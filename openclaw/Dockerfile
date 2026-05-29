@@ -17,7 +17,8 @@ RUN apt-get purge -y nodejs npm \
 
 # Install OpenClaw globally as root so the binary lands in the image-wide
 # node_modules (on ankit's PATH). Pinned for reproducibility — bump deliberately.
-RUN npm install -g openclaw@2026.5.26 && openclaw --version
+ARG OPENCLAW_VERSION=latest
+RUN npm install -g openclaw@${OPENCLAW_VERSION} && openclaw --version
 
 # ACP runtime + harnesses for /acp spawn:
 #   @openclaw/acpx           — OpenClaw's ACP backend plugin
