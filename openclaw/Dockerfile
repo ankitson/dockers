@@ -1,0 +1,44 @@
+# OpenClaw gateway image — thin layer over the devbox image so OpenClaw runs in
+# the same toolchain/environment as the Hermes sandbox, without touching agent-devbox.
+ARG DEVBOX_TAG=1.4
+FROM ankit/devbox:${DEVBOX_TAG}
+
+# Pin Node to 22 LTS for OpenClaw only. Devbox ships Node 25, which crashes openclaw
+# 2026.5.26 with `ERR_INVALID_STATE: A FileHandle object was closed during garbage
+# collection` on session jsonl.lock cleanup (Node 25 promoted that deprecation to a
+# hard error). Hermes/agent-devbox keep Node 25 — this pin is local to the openclaw image.
+USER root
+RUN apt-get purge -y nodejs npm \
+ && rm -f /etc/apt/sources.list.d/nodesource.list \
+ && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+ && apt-get install -y -q nodejs \
+ && node --version | grep -q '^v22\.' \
+ && npm install -g pnpm bun typescript
+
+# Install OpenClaw globally as root so the binary lands in the image-wide
+# node_modules (on ankit's PATH). Pinned for reproducibility — bump deliberately.
+RUN npm install -g openclaw@2026.5.26 && openclaw --version
+
+# ACP runtime + harnesses for /acp spawn:
+#   @openclaw/acpx           — OpenClaw's ACP backend plugin
+#   @earendil-works/pi-coding-agent — the pi coding agent CLI
+#   pi-acp                   — ACP adapter for pi (spawns `pi --mode rpc` and bridges ACP JSON-RPC)
+#   opencode-ai              — opencode coding agent CLI (acpx supports it natively as harness id "opencode")
+# Mirrored in /projects/devdocker/node.sh so future devbox image rebuilds also include these.
+RUN npm install -g \
+      @openclaw/acpx \
+      @earendil-works/pi-coding-agent \
+      pi-acp \
+      opencode-ai \
+ && pi --version 2>/dev/null \
+ && pi-acp --version 2>/dev/null \
+ && opencode --version 2>/dev/null \
+ || true
+
+COPY entrypoint.sh /usr/local/bin/openclaw-entrypoint
+RUN chmod +x /usr/local/bin/openclaw-entrypoint
+
+USER ankit
+WORKDIR /home/ankit
+
+ENTRYPOINT ["/usr/local/bin/openclaw-entrypoint"]
