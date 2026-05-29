@@ -1,6 +1,6 @@
 # OpenClaw gateway image — thin layer over the devbox image so OpenClaw runs in
 # the same toolchain/environment as the Hermes sandbox, without touching agent-devbox.
-ARG DEVBOX_TAG=1.4
+ARG DEVBOX_TAG=latest
 FROM ankit/devbox:${DEVBOX_TAG}
 
 # Pin Node to 22 LTS for OpenClaw only. Devbox ships Node 25, which crashes openclaw

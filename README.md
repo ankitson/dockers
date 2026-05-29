@@ -9,6 +9,10 @@ or two, anything else the image needs at build time.
 - `openclaw/` — thin layer over `ankit/devbox` that installs the openclaw
   gateway + ACP harnesses. Consumed by `~/hroot/devserver/docker-compose.yml`
   (service `openclaw`).
+- `agent-browser/` — chromium + Xvfb + x11vnc + noVNC sidecar. Generic
+  CDP-driven browser; any agent on the network can drive it. Based on
+  `debian:bookworm-slim`. Consumed by `~/hroot/devserver/docker-compose.yml`
+  (service `agent-browser`).
 
 ## Adding a new image
 
