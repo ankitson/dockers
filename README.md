@@ -13,6 +13,9 @@ or two, anything else the image needs at build time.
   CDP-driven browser; any agent on the network can drive it. Based on
   `debian:bookworm-slim`. Consumed by `~/hroot/devserver/docker-compose.yml`
   (service `agent-browser`).
+- `mcpproxy/` — pinned MCPProxy personal-edition gateway image. Seeds its
+  configuration once and persists live OAuth and token state under `/data`.
+  Consumed by `~/hroot/devserver/docker-compose.yml` (service `mcpproxy`).
 
 ## Adding a new image
 
