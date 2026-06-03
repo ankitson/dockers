@@ -17,16 +17,20 @@ RUN apt-get purge -y nodejs npm \
 
 # Install OpenClaw globally as root so the binary lands in the image-wide
 # node_modules (on ankit's PATH). Pinned for reproducibility — bump deliberately.
-ARG OPENCLAW_VERSION=latest
-RUN npm install -g openclaw@${OPENCLAW_VERSION} && openclaw --version
+ARG OPENCLAW_VERSION=2026.5.28
+ARG OPENCLAW_CODEX_VERSION=${OPENCLAW_VERSION}
+RUN npm install -g openclaw@${OPENCLAW_VERSION} \
+ && openclaw --version
 
 # ACP runtime + harnesses for /acp spawn:
+#   @openclaw/codex          — OpenClaw's Codex app-server harness plugin
 #   @openclaw/acpx           — OpenClaw's ACP backend plugin
 #   @earendil-works/pi-coding-agent — the pi coding agent CLI
 #   pi-acp                   — ACP adapter for pi (spawns `pi --mode rpc` and bridges ACP JSON-RPC)
 #   opencode-ai              — opencode coding agent CLI (acpx supports it natively as harness id "opencode")
 # Mirrored in /projects/devdocker/node.sh so future devbox image rebuilds also include these.
 RUN npm install -g \
+      @openclaw/codex@${OPENCLAW_CODEX_VERSION} \
       @openclaw/acpx \
       @earendil-works/pi-coding-agent \
       pi-acp \
