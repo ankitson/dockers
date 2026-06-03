@@ -15,7 +15,7 @@ RUN apk add --no-cache ca-certificates curl tar \
 
 FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
 
-RUN apk add --no-cache ca-certificates \
+RUN apk add --no-cache bash ca-certificates nodejs npm \
   && addgroup -g 1000 mcpproxy \
   && adduser -D -u 1000 -G mcpproxy -h /data mcpproxy \
   && mkdir -p /data \
