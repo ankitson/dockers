@@ -40,6 +40,15 @@ RUN npm install -g \
  && opencode --version 2>/dev/null \
  || true
 
+# Docker Compose CLI plugin. Devbox (devbase.sh) ships `docker-ce-cli` but not the
+# compose plugin; gilfoyle's ops loops run `docker compose pull/up` against the mounted
+# homeserver/devserver stacks. Scoped to the openclaw image so other devbox consumers
+# are untouched. The docker socket itself is bind-mounted by the compose service.
+RUN apt-get update \
+ && apt-get install -y -q docker-compose-plugin \
+ && docker compose version \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY entrypoint.sh /usr/local/bin/openclaw-entrypoint
 RUN chmod +x /usr/local/bin/openclaw-entrypoint
 
