@@ -49,6 +49,13 @@ RUN apt-get update \
  && docker compose version \
  && rm -rf /var/lib/apt/lists/*
 
+# Workaround for an OpenClaw packaging bug (≤2026.6.1): the /export-session slash handler
+# opens dist/export-html/template.html, but the assets ship at
+# dist/auto-reply/reply/export-html/. Without this the interaction throws ENOENT and hangs.
+# Symlink the directory so the handler finds template.html/.css/.js/vendor. Remove once upstream fixes it.
+RUN ln -sfn auto-reply/reply/export-html /usr/lib/node_modules/openclaw/dist/export-html \
+ && test -e /usr/lib/node_modules/openclaw/dist/export-html/template.html
+
 COPY entrypoint.sh /usr/local/bin/openclaw-entrypoint
 RUN chmod +x /usr/local/bin/openclaw-entrypoint
 
