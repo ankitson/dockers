@@ -1,5 +1,5 @@
-ARG BIFROST_REF=e9d1f3a6bce0cacde76e361dac36a66f5034ca2e
-ARG VERSION=dynamic-local
+ARG BIFROST_REF=transports/v1.6.0
+ARG VERSION=1.6.0
 
 FROM node:25-alpine3.23 AS ui-builder
 ARG BIFROST_REF
