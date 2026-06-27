@@ -16,6 +16,9 @@ or two, anything else the image needs at build time.
 - `mcpproxy/` — pinned MCPProxy personal-edition gateway image. Seeds its
   configuration once and persists live OAuth and token state under `/data`.
   Consumed by `~/hroot/devserver/docker-compose.yml` (service `mcpproxy`).
+- `bifrost-dynamic/` — local Bifrost build with dynamic Go plugin support and
+  the `model-policy-suffix` plugin baked in. Consumed by
+  `~/hroot/devserver/docker-compose.yml` (service `bifrost`).
 
 ## Adding a new image
 
