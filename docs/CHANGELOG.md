@@ -8,6 +8,9 @@
 - Added `model-policy-suffix`, a Bifrost plugin that maps trailing model suffix
   directives like `[zdr,provider=digitalocean]` into OpenRouter provider-routing
   request fields.
+- Expanded `model-policy-suffix` to accept arbitrary OpenRouter request params
+  from the model suffix via raw JSON object, quoted JSON, `json64:...`, or
+  query/dotted-key forms while keeping the shorthand ZDR/provider syntax.
 - Added `bifrost-plugin-test` and `bifrost-dynamic-build` Just recipes.
 
 ## 2026-06-02

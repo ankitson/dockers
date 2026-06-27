@@ -12,12 +12,20 @@
   before provider routing, and injects OpenRouter `provider` routing fields via
   Bifrost `ExtraParams`.
 - Supported suffix directives include bare `zdr`, `provider=...`, `only=...`,
-  `order=...`, `allow_fallbacks=...`, and generic `key=value` passthrough into
-  OpenRouter's `provider` object. `provider=...` implies
-  `allow_fallbacks:false` unless explicitly overridden.
+  `order=...`, `allow_fallbacks=...`, dotted keys such as
+  `reasoning.effort=high`, query-style suffixes such as
+  `[?provider.only=digitalocean&reasoning.effort=high]`, and exact JSON object
+  suffixes such as
+  `[{"provider":{"only":["digitalocean"],"allow_fallbacks":false},"reasoning":{"effort":"high"}}]`.
+  `provider=...` / `provider.only=...` imply `allow_fallbacks:false` unless
+  explicitly overridden. Raw JSON is not mutated, so include
+  `"allow_fallbacks":false` there when the intent is a hard provider pin.
 - Verification: plugin unit tests pass, the Docker image builds as
   `ankit/bifrost-dynamic:local`, and the running devserver Bifrost reports the
-  plugin active.
+  plugin active. End-to-end JSON suffix checks proved impossible providers fail
+  at OpenRouter routing, and a DigitalOcean/ZDR JSON suffix produced OpenRouter
+  generation `gen-1782519262-Agsv4Zb3PRmoKoh0DiHy` with
+  `provider_name: DigitalOcean` and `preset_id:null`.
 
 ## 2026-06-02 - MCPProxy personal-edition image
 - Goal: package MCPProxy as a reproducible local image for the devserver MCP gateway.
