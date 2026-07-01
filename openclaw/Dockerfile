@@ -22,6 +22,10 @@ ARG OPENCLAW_CODEX_VERSION=${OPENCLAW_VERSION}
 RUN npm install -g openclaw@${OPENCLAW_VERSION} \
  && openclaw --version
 
+COPY patch-openclaw-bifrost-embeddings.mjs /tmp/patch-openclaw-bifrost-embeddings.mjs
+RUN node /tmp/patch-openclaw-bifrost-embeddings.mjs \
+ && rm /tmp/patch-openclaw-bifrost-embeddings.mjs
+
 # ACP runtime + harnesses for /acp spawn:
 #   @openclaw/codex          — OpenClaw's Codex app-server harness plugin
 #   @openclaw/acpx           — OpenClaw's ACP backend plugin
