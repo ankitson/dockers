@@ -134,3 +134,81 @@ func TestParseModelPolicySuffixQueryBody(t *testing.T) {
 		t.Fatalf("extra = %#v, want %#v", extra, want)
 	}
 }
+
+func TestOpenRouterTEEAliasPinsPhalaZDR(t *testing.T) {
+	base, extra, ok, err := parseModelPolicySuffix("openai/gpt-oss-20b[tee]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected suffix to parse")
+	}
+	model, extra := applyPrivacyAliases(nil, "openrouter", base, extra)
+	if model != "openai/gpt-oss-20b" {
+		t.Fatalf("model = %q", model)
+	}
+
+	want := map[string]any{
+		"provider": map[string]any{
+			"only":            []string{"phala"},
+			"allow_fallbacks": false,
+			"zdr":             true,
+			"data_collection": "deny",
+		},
+	}
+	if !reflect.DeepEqual(extra, want) {
+		t.Fatalf("extra = %#v, want %#v", extra, want)
+	}
+}
+
+func TestOpenRouterTEEAliasKeepsExplicitProvider(t *testing.T) {
+	base, extra, ok, err := parseModelPolicySuffix("m[tee,provider=chutes]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected suffix to parse")
+	}
+	_, extra = applyPrivacyAliases(nil, "openrouter", base, extra)
+	policy := extra["provider"].(map[string]any)
+	if !reflect.DeepEqual(policy["only"], []string{"chutes"}) {
+		t.Fatalf("only = %#v", policy["only"])
+	}
+	if policy["allow_fallbacks"] != false {
+		t.Fatalf("allow_fallbacks = %#v", policy["allow_fallbacks"])
+	}
+}
+
+func TestVeniceE2EEAliasMapsFriendlyModel(t *testing.T) {
+	base, extra, ok, err := parseModelPolicySuffix("gpt-oss-20b[e2ee]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected suffix to parse")
+	}
+	model, extra := applyPrivacyAliases(nil, "venice", base, extra)
+	if model != "e2ee-gpt-oss-20b-p" {
+		t.Fatalf("model = %q", model)
+	}
+	if len(extra) != 0 {
+		t.Fatalf("extra = %#v, want empty", extra)
+	}
+}
+
+func TestVeniceTEEAliasLeavesExplicitTEEModel(t *testing.T) {
+	base, extra, ok, err := parseModelPolicySuffix("tee-qwen3-5-122b-a10b[tee]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected suffix to parse")
+	}
+	model, extra := applyPrivacyAliases(nil, "venice", base, extra)
+	if model != "tee-qwen3-5-122b-a10b" {
+		t.Fatalf("model = %q", model)
+	}
+	if len(extra) != 0 {
+		t.Fatalf("extra = %#v, want empty", extra)
+	}
+}

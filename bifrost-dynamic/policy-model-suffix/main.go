@@ -19,7 +19,7 @@ func Cleanup() error { return nil }
 
 func PreRequestHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) error {
 	provider, model, _ := req.GetRequestFields()
-	if provider != schemas.OpenRouter || model == "" {
+	if model == "" {
 		return nil
 	}
 
@@ -32,6 +32,7 @@ func PreRequestHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) er
 		return nil
 	}
 
+	baseModel, extraParams = applyPrivacyAliases(ctx, provider, baseModel, extraParams)
 	req.SetModel(baseModel)
 	if len(extraParams) > 0 {
 		if !mergeExtraParams(req, extraParams) {
@@ -41,7 +42,7 @@ func PreRequestHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) er
 		ctx.SetValue(schemas.BifrostContextKeyPassthroughExtraParams, true)
 	}
 
-	ctx.Log(schemas.LogLevelInfo, fmt.Sprintf("model-policy-suffix applied OpenRouter policy to %q -> %q", model, baseModel))
+	ctx.Log(schemas.LogLevelInfo, fmt.Sprintf("model-policy-suffix applied policy to %s/%q -> %q", provider, model, baseModel))
 	return nil
 }
 
@@ -174,6 +175,7 @@ func parseJSONObject(body string) (map[string]any, error) {
 func parseDirectiveBody(body string) (map[string]any, error) {
 	extraParams := map[string]any{}
 	providerPolicy := map[string]any{}
+	privacyPolicy := map[string]any{}
 	pinnedProvider := false
 	fallbackExplicit := false
 
@@ -190,9 +192,13 @@ func parseDirectiveBody(body string) (map[string]any, error) {
 
 		if !hasValue {
 			switch key {
+			case "tee":
+				privacyPolicy["tee"] = true
 			case "zdr":
 				providerPolicy["zdr"] = true
 				providerPolicy["data_collection"] = "deny"
+			case "e2ee":
+				privacyPolicy["e2ee"] = true
 			case "no_fallbacks", "no-fallbacks":
 				providerPolicy["allow_fallbacks"] = false
 				fallbackExplicit = true
@@ -203,6 +209,12 @@ func parseDirectiveBody(body string) (map[string]any, error) {
 		}
 
 		switch key {
+		case "tee":
+			b, err := strconv.ParseBool(value)
+			if err != nil {
+				return nil, fmt.Errorf("invalid tee value %q", value)
+			}
+			privacyPolicy["tee"] = b
 		case "zdr":
 			b, err := strconv.ParseBool(value)
 			if err != nil {
@@ -211,6 +223,22 @@ func parseDirectiveBody(body string) (map[string]any, error) {
 			providerPolicy["zdr"] = b
 			if b {
 				providerPolicy["data_collection"] = "deny"
+			}
+		case "e2ee":
+			b, err := strconv.ParseBool(value)
+			if err != nil {
+				return nil, fmt.Errorf("invalid e2ee value %q", value)
+			}
+			privacyPolicy["e2ee"] = b
+		case "privacy":
+			parsed, err := parseValue(value)
+			if err != nil {
+				return nil, fmt.Errorf("invalid privacy value: %w", err)
+			}
+			if privacyMap, ok := parsed.(map[string]any); ok {
+				mergeMaps(privacyPolicy, privacyMap)
+			} else {
+				privacyPolicy[fmt.Sprint(parsed)] = true
 			}
 		case "provider":
 			parsed, err := parseValue(value)
@@ -259,6 +287,9 @@ func parseDirectiveBody(body string) (map[string]any, error) {
 	if len(providerPolicy) > 0 {
 		extraParams["provider"] = providerPolicy
 	}
+	if len(privacyPolicy) > 0 {
+		extraParams["_privacy"] = privacyPolicy
+	}
 
 	return extraParams, nil
 }
@@ -271,6 +302,7 @@ func parseQueryBody(body string) (map[string]any, error) {
 
 	extraParams := map[string]any{}
 	providerPolicy := map[string]any{}
+	privacyPolicy := map[string]any{}
 	pinnedProvider := false
 	fallbackExplicit := false
 	for key, rawValues := range values {
@@ -305,6 +337,23 @@ func parseQueryBody(body string) (map[string]any, error) {
 			}
 			continue
 		}
+		if strings.HasPrefix(key, "privacy.") {
+			privacyKey := normalizeKey(strings.TrimPrefix(key, "privacy."), false)
+			privacyPolicy[privacyKey] = value
+			continue
+		}
+		switch key {
+		case "tee", "e2ee":
+			privacyPolicy[key] = value
+			continue
+		case "privacy":
+			if privacyMap, ok := value.(map[string]any); ok {
+				mergeMaps(privacyPolicy, privacyMap)
+			} else {
+				privacyPolicy[fmt.Sprint(value)] = true
+			}
+			continue
+		}
 		if isProviderPreferenceKey(key) {
 			providerPolicy[key] = normalizeProviderValue(key, value)
 			if key == "only" {
@@ -323,8 +372,119 @@ func parseQueryBody(body string) (map[string]any, error) {
 	if len(providerPolicy) > 0 {
 		extraParams["provider"] = providerPolicy
 	}
+	if len(privacyPolicy) > 0 {
+		extraParams["_privacy"] = privacyPolicy
+	}
 
 	return extraParams, nil
+}
+
+func applyPrivacyAliases(ctx *schemas.BifrostContext, provider schemas.ModelProvider, model string, extraParams map[string]any) (string, map[string]any) {
+	privacy, ok := extraParams["_privacy"].(map[string]any)
+	if !ok {
+		return model, extraParams
+	}
+	delete(extraParams, "_privacy")
+
+	tee := truthy(privacy["tee"])
+	e2ee := truthy(privacy["e2ee"])
+	switch strings.ToLower(string(provider)) {
+	case string(schemas.OpenRouter):
+		if tee {
+			providerPolicy := ensureProviderPolicy(extraParams)
+			if _, hasOnly := providerPolicy["only"]; !hasOnly {
+				providerPolicy["only"] = []string{"phala"}
+			}
+			providerPolicy["allow_fallbacks"] = false
+			providerPolicy["zdr"] = true
+			providerPolicy["data_collection"] = "deny"
+		}
+		if e2ee {
+			logWarn(ctx, "model-policy-suffix [e2ee] requested for OpenRouter, but OpenRouter routing cannot add client-side encryption")
+		}
+	case "venice":
+		if e2ee {
+			model = veniceE2EEModel(model)
+			logWarn(ctx, "model-policy-suffix [e2ee] selected a Venice E2EE model, but client-side encryption and Venice E2EE headers are still required")
+		} else if tee {
+			model = veniceTEEModel(model)
+		}
+	default:
+		if tee || e2ee {
+			logWarn(ctx, fmt.Sprintf("model-policy-suffix privacy alias ignored for unsupported provider %s", provider))
+		}
+	}
+	return model, extraParams
+}
+
+func logWarn(ctx *schemas.BifrostContext, message string) {
+	if ctx != nil {
+		ctx.Log(schemas.LogLevelWarn, message)
+	}
+}
+
+func ensureProviderPolicy(extraParams map[string]any) map[string]any {
+	providerPolicy, _ := extraParams["provider"].(map[string]any)
+	if providerPolicy == nil {
+		providerPolicy = map[string]any{}
+		extraParams["provider"] = providerPolicy
+	}
+	return providerPolicy
+}
+
+func truthy(value any) bool {
+	switch v := value.(type) {
+	case bool:
+		return v
+	case string:
+		b, err := strconv.ParseBool(v)
+		return err == nil && b
+	default:
+		return false
+	}
+}
+
+func veniceTEEModel(model string) string {
+	if strings.HasPrefix(model, "tee-") || strings.HasPrefix(model, "e2ee-") {
+		return model
+	}
+	return veniceE2EEModel(model)
+}
+
+func veniceE2EEModel(model string) string {
+	if strings.HasPrefix(model, "e2ee-") {
+		return model
+	}
+	aliases := map[string]string{
+		"gpt-oss-20b":                "e2ee-gpt-oss-20b-p",
+		"openai-gpt-oss-20b":         "e2ee-gpt-oss-20b-p",
+		"gpt-oss-120b":               "e2ee-gpt-oss-120b-p",
+		"openai-gpt-oss-120b":        "e2ee-gpt-oss-120b-p",
+		"gemma-4-31b":                "e2ee-gemma-4-31b",
+		"google-gemma-4-31b-it":      "e2ee-gemma-4-31b",
+		"gemma-3-27b":                "e2ee-gemma-3-27b-p",
+		"gemma-4-26b-a4b-uncensored": "e2ee-gemma-4-26b-a4b-uncensored-p",
+		"google-gemma-4-26b-a4b-it":  "e2ee-gemma-4-26b-a4b-uncensored-p",
+		"glm-5-2":                    "e2ee-glm-5-2-p",
+		"zai-org-glm-5-2":            "e2ee-glm-5-2-p",
+		"glm-5-1":                    "e2ee-glm-5-1",
+		"zai-org-glm-5-1":            "e2ee-glm-5-1",
+		"glm-4-7":                    "e2ee-glm-4-7-p",
+		"zai-org-glm-4-7":            "e2ee-glm-4-7-p",
+		"qwen-2-5-7b":                "e2ee-qwen-2-5-7b-p",
+		"qwen3-30b-a3b":              "e2ee-qwen3-30b-a3b-p",
+		"qwen3-6-35b-a3b":            "e2ee-qwen3-6-35b-a3b",
+		"qwen3-6-35b-a3b-uncensored": "e2ee-qwen3-6-35b-a3b-uncensored-p",
+		"qwen3-vl-30b-a3b":           "e2ee-qwen3-vl-30b-a3b-p",
+		"venice-uncensored-24b":      "e2ee-venice-uncensored-24b-p",
+		"venice-uncensored-1-1":      "e2ee-venice-uncensored-24b-p",
+		"e2ee-venice-uncensored-1-1": "e2ee-venice-uncensored-24b-p",
+		"e2ee-venice-uncensored-24b": "e2ee-venice-uncensored-24b-p",
+	}
+	if resolved, ok := aliases[model]; ok {
+		return resolved
+	}
+	return "e2ee-" + model
 }
 
 func splitDirectives(body string) []string {
