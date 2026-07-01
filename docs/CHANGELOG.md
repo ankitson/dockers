@@ -1,5 +1,17 @@
 # Dockers Changelog
 
+## 2026-07-01
+
+### OpenClaw Bifrost embedding passthrough patch
+- Added `openclaw/patch-openclaw-bifrost-embeddings.mjs`, a post-install runtime patch for the npm OpenClaw package.
+- Updated the OpenClaw image build to apply that patch after `npm install -g openclaw@...`.
+- The patch makes the OpenAI-compatible embedding adapter serialize `input_type` as `extra_params.input_type` when `x-bf-passthrough-extra-params: true` is configured, which matches Bifrost's supported extra-param transport.
+
+### Bifrost embedding task-prefix plugin
+- Added `bifrost-dynamic/embedding-task-prefix`, a Bifrost plugin that rewrites embedding text using configurable task prefixes based on provider/model matching and an `input_type` request field.
+- Added unit tests for config parsing, single-string and batched embeddings, idempotent prefixing, and unmatched requests.
+- Updated the custom Bifrost image and plugin test recipe to build and test `embedding-task-prefix.so` alongside `model-policy-suffix.so`.
+
 ## 2026-06-26
 
 ### Bifrost dynamic model-policy image

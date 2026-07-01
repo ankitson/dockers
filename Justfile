@@ -11,6 +11,7 @@ version: build
 
 bifrost-plugin-test:
   cd bifrost-dynamic/policy-model-suffix && go test ./...
+  cd bifrost-dynamic/embedding-task-prefix && go test ./...
 
 bifrost-dynamic-build: bifrost-plugin-test
   docker build --tag {{BIFROST_DYNAMIC_IMAGE}} ./bifrost-dynamic

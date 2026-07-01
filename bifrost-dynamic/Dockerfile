@@ -33,6 +33,12 @@ RUN go mod edit -replace github.com/maximhq/bifrost/core=/src/core && \
   go mod tidy && \
   go build -buildmode=plugin -trimpath -ldflags="-w -s" -o /out/plugins/model-policy-suffix.so .
 
+COPY embedding-task-prefix/ /plugin-src/
+WORKDIR /plugin-src
+RUN go mod edit -replace github.com/maximhq/bifrost/core=/src/core && \
+  go mod tidy && \
+  go build -buildmode=plugin -trimpath -ldflags="-w -s" -o /out/plugins/embedding-task-prefix.so .
+
 FROM alpine:3.23.4
 WORKDIR /app
 RUN apk add --no-cache musl libgcc ca-certificates zlib sqlite-libs && \

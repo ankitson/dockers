@@ -1,5 +1,30 @@
 # Dockers Notes
 
+## 2026-07-01
+
+### OpenClaw image patch for Bifrost embedding passthrough
+#### Goal
+- Make the npm-installed OpenClaw image compatible with the local Bifrost embedding shim without forking the whole OpenClaw package build.
+#### Discovery
+- The running `ankit/openclaw:local` image installs OpenClaw from npm and executes the bundled `dist/registry-*.js` runtime, so editing the checkout under `projects/external-repo/openclaw` would not affect production.
+- OpenClaw already supports custom memory-search headers, but its OpenAI-compatible embedding adapter serializes `input_type` only as a top-level field, which Bifrost's OpenAI embeddings route drops before plugins run.
+#### Decision
+- Added a post-install image patch that rewrites the bundled OpenClaw embedding adapter so `input_type` is sent as `extra_params.input_type` whenever `x-bf-passthrough-extra-params: true` is configured.
+#### Verification
+- The image patch script fails closed if the expected upstream snippet changes, forcing an intentional review on future OpenClaw upgrades.
+
+### Bifrost reusable embedding task-prefix shim
+#### Goal
+- Add a reusable Bifrost plugin that can normalize embedding input text for models that require task prefixes rather than OpenAI-style metadata fields.
+#### Discovery
+- Bifrost exposes embedding text plus provider/model metadata and `EmbeddingParameters.ExtraParams` to plugins before provider serialization.
+- Ollama's OpenAI-compatible embeddings endpoint for `nomic-embed-text` ignores `input_type`, but changing the literal text prefix changes the resulting vector.
+#### Decision
+- Added `bifrost-dynamic/embedding-task-prefix`, a config-driven plugin that matches embedding requests by provider/model and rewrites each input string using a role-to-prefix map keyed by `input_type`.
+- Defaulted the plugin to no-op unless a rule matches and an `input_type` value has a configured prefix, so it is safe to leave enabled globally.
+#### Verification
+- Unit tests cover config normalization, query/document rewriting, batched inputs, already-prefixed inputs, and unmatched requests.
+
 ## 2026-06-26 - Bifrost dynamic model-policy image
 - Goal: avoid one OpenRouter preset per model/provider by making Bifrost own
   model-string policy.
