@@ -41,6 +41,127 @@ const OAUTH_FILE = process.env.OAUTH_FILE ?? "/codex/auth.json";
 
 const MAX_CACHE_ENTRIES = 2000;
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h — well past any realistic agent-turn gap
+const LOG_LEVEL = (() => {
+	const explicit = process.env.PROXY_LOG_LEVEL ?? (process.env.PROXY_VERBOSE === "1" ? "debug" : "info");
+	const normalized = explicit.toLowerCase();
+	return normalized;
+})();
+const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
+
+function shouldLog(level) {
+	const threshold = LOG_LEVELS[LOG_LEVEL];
+	const candidate = LOG_LEVELS[level];
+	if (typeof threshold !== "number" || typeof candidate !== "number") return level === "error" || level === "warn" || level === "info";
+	return candidate <= threshold;
+}
+
+function clamp(text, maxLen) {
+	if (text == null) return text;
+	const s = typeof text === "string" ? text : JSON.stringify(text);
+	if (typeof s !== "string" || s.length <= maxLen) return s;
+	return `${s.slice(0, maxLen)}…(+${s.length - maxLen})`;
+}
+
+function log(level, message, details = {}) {
+	if (!shouldLog(level)) return;
+	try {
+		console.log(
+			JSON.stringify({
+				ts: new Date().toISOString(),
+				level,
+				message,
+				...details,
+			}),
+		);
+	} catch {
+		console.log(`${new Date().toISOString()} ${level} ${message}`, details);
+	}
+}
+
+function summarizeMessages(messages = []) {
+	const byRole = {};
+	let toolTurnCount = 0;
+	let toolCalls = 0;
+	for (const message of messages) {
+		if (!message || typeof message !== "object") continue;
+		byRole[message.role] = (byRole[message.role] || 0) + 1;
+		if (message.role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+			toolTurnCount += 1;
+			toolCalls += message.tool_calls.length;
+		}
+	}
+	return { total: messages.length, byRole, toolTurnCount, toolCalls };
+}
+
+function summarizeInputItems(items = [], limit = 12) {
+	return items.slice(0, limit).map((item) => ({
+		type: item?.type,
+		role: item?.role,
+		callId: item?.call_id,
+		name: item?.name,
+	}));
+}
+
+function describeSseBody(body = {}) {
+	return {
+		stream: body.stream,
+		model: body.model,
+		reasoningEffort: body.reasoning_effort,
+		toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
+		parallelToolCalls: body.parallel_tool_calls,
+		messageSummary: summarizeMessages(body.messages),
+	};
+}
+
+function extractRequestId(req) {
+	for (const key of ["x-request-id", "x-bf-request-id", "x-request-id-cf"]) {
+		const raw = req.headers[key];
+		if (!raw) continue;
+		if (Array.isArray(raw)) return raw[0];
+		if (typeof raw === "string") return raw;
+	}
+	return `req-${randomUUID()}`;
+}
+
+function normalizeUpstreamError(errorLike, messageFallback) {
+	const raw = typeof errorLike === "string" ? { message: errorLike } : errorLike;
+	if (!raw || typeof raw !== "object") {
+		return { status: 500, message: messageFallback || "Upstream request failed.", type: "api_error", code: "upstream_error" };
+	}
+	const envelope = raw.error && typeof raw.error === "object" ? raw.error : raw;
+	const code = envelope.code;
+	const type = envelope.type;
+	const message = envelope.message || messageFallback || "Upstream request failed.";
+	let status = 500;
+	let openAIType = type || "api_error";
+	if (code === "context_length_exceeded") {
+		status = 400;
+		openAIType = "invalid_request_error";
+	} else if (code === "rate_limit_exceeded") {
+		status = 429;
+		openAIType = "rate_limit_error";
+	} else if (code === "insufficient_quota") {
+		status = 403;
+		openAIType = "insufficient_quota";
+	}
+	return {
+		status,
+		error: {
+			message,
+			type: openAIType,
+			param: envelope.param ?? null,
+			code,
+		},
+	};
+}
+
+function buildUpstreamErrorResponse(errorLike, messageFallback) {
+	const normalized = normalizeUpstreamError(errorLike, messageFallback);
+	return {
+		status: normalized.status,
+		error: normalized.error,
+	};
+}
 
 /** turn key (hash of sorted tool_call ids) -> {items: RawResponsesOutputItem[], expiresAt} */
 const turnCache = new Map();
@@ -184,16 +305,25 @@ function reasoningEffortFromBody(body) {
  * output_item.done, and only use response.completed for top-level metadata
  * (status/usage/id/timestamps).
  */
-async function collectCompletedResponseFromSse(body) {
+async function collectCompletedResponseFromSse(body, requestContext = {}) {
+	const requestId = requestContext.requestId || `req-${randomUUID()}`;
 	const reader = body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = "";
 	let completedMeta;
 	let lastError;
+	let totalBytes = 0;
+	let eventCount = 0;
+	let parseErrors = 0;
+	const eventCounts = {};
 	const itemsByIndex = new Map();
+	let lastEventType;
+	let lastOutputIndex;
+	log("debug", "upstream_sse_started", { requestId, model: requestContext.model });
 	while (true) {
 		const { done, value } = await reader.read();
 		if (done) break;
+		totalBytes += value?.byteLength || 0;
 		buffer += decoder.decode(value, { stream: true });
 		let idx;
 		while ((idx = buffer.indexOf("\n\n")) !== -1) {
@@ -207,9 +337,15 @@ async function collectCompletedResponseFromSse(body) {
 				try {
 					event = JSON.parse(payload);
 				} catch {
+					parseErrors += 1;
+				if (parseErrors <= 3) log("warn", "upstream_sse_parse_error", { requestId, payload: clamp(payload, 240), parseErrors });
 					continue;
 				}
-				if (process.env.PROXY_VERBOSE === "1") console.log(`sse event: ${event.type}`);
+				eventCount += 1;
+				eventCounts[event.type] = (eventCounts[event.type] || 0) + 1;
+				lastEventType = event.type;
+				if (event.output_index !== undefined) lastOutputIndex = event.output_index;
+				log("debug", "upstream_sse_event", { requestId, type: event.type, outputIndex: event.output_index, responseId: event.response?.id });
 				if (event.type === "response.output_item.done") {
 					itemsByIndex.set(event.output_index, event.item);
 				}
@@ -219,36 +355,92 @@ async function collectCompletedResponseFromSse(body) {
 			}
 		}
 	}
+	log("info", "upstream_sse_finished", {
+		requestId,
+		totalBytes,
+		eventCount,
+		parseErrors,
+		eventCounts,
+		outputItemCount: itemsByIndex.size,
+		lastEventType,
+		lastOutputIndex,
+		completed: !!completedMeta,
+	});
 	if (!completedMeta) {
-		throw new Error(`upstream stream ended without response.completed${lastError ? `: ${JSON.stringify(lastError)}` : ""}`);
+		log("warn", "upstream_stream_ended_without_completed", {
+			requestId,
+			lastError: lastError ? clamp(lastError, 1200) : null,
+			lastEventType,
+			lastOutputIndex,
+			eventCounts,
+		});
+		const upstreamError = buildUpstreamErrorResponse(lastError, "upstream stream ended without response.completed");
+		const err = new Error(upstreamError.error.message);
+		err.status = upstreamError.status;
+		err.openaiError = upstreamError.error;
+		throw err;
 	}
 	const output = [...itemsByIndex.entries()].sort((a, b) => a[0] - b[0]).map(([, item]) => item);
+	log("debug", "upstream_items_assembled", { requestId, outputCount: output.length, sampleOutput: summarizeInputItems(output) });
 	return { ...completedMeta, output: output.length > 0 ? output : (completedMeta.output ?? []) };
 }
 
-async function callUpstreamResponses(client, body) {
+async function callUpstreamResponses(client, body, requestContext = {}) {
+	const requestId = requestContext.requestId || `req-${randomUUID()}`;
+	const startedAt = Date.now();
+	log("info", "upstream_request_start", { requestId, model: body.model, inputCount: Array.isArray(body.input) ? body.input.length : 0, toolCount: Array.isArray(body.tools) ? body.tools.length : 0 });
 	const resp = await client.request("/responses", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ ...body, stream: true }),
 	});
+	log("debug", "upstream_response_status", { requestId, status: resp.status, ok: resp.ok, contentType: resp.headers?.get?.("content-type"), latencyMs: Date.now() - startedAt });
 	if (!resp.ok) {
 		const text = await resp.text();
-		const err = new Error(`upstream ${resp.status}: ${text.slice(0, 500)}`);
-		err.status = resp.status;
+		log("error", "upstream_non_ok", { requestId, status: resp.status, body: clamp(text, 500) });
+		let upstreamBody;
+		try {
+			upstreamBody = JSON.parse(text);
+		} catch {
+			// non-JSON bodies are still forwarded as a generic upstream failure
+		}
+		const upstreamError = buildUpstreamErrorResponse(
+			upstreamBody ?? { code: resp.status >= 500 ? "api_error" : "invalid_request_error", message: text || `upstream ${resp.status}` },
+			`upstream ${resp.status}: ${text.slice(0, 500)}`,
+		);
+		const err = new Error(upstreamError.error.message);
+		err.status = upstreamError.status;
+		err.openaiError = upstreamError.error;
 		err.body = text;
 		throw err;
 	}
-	return collectCompletedResponseFromSse(resp.body);
+	const responsesResult = await collectCompletedResponseFromSse(resp.body, requestContext);
+	log("debug", "upstream_response_complete", {
+		requestId,
+		responseId: responsesResult.id,
+		status: responsesResult.status,
+		model: responsesResult.model,
+		usage: responsesResult.usage,
+		latencyMs: Date.now() - startedAt,
+	});
+	return responsesResult;
 }
 
-async function handleChatCompletions(body, client) {
-	const model = body.model ?? "gpt-5.4";
+async function handleChatCompletions(body, client, requestContext = {}) {
+	const model = requestContext.model || body.model || "gpt-5.4";
+	log("info", "chat_completion_start", {
+		requestId: requestContext.requestId,
+		model,
+		stream: body.stream,
+		reasoningEffort: body.reasoning_effort,
+		messageSummary: summarizeMessages(body.messages),
+	});
 	const tools = chatToolsToResponsesTools(body.tools);
 	const toolChoice = chatToolChoiceToResponses(body.tool_choice);
 	const reasoning = reasoningEffortFromBody(body);
 
 	const { instructions, input } = buildResponsesInput(body.messages, model);
+	log("debug", "chat_completion_input", { requestId: requestContext.requestId, model, instructionLength: instructions?.length ?? 0, inputCount: input.length, toolCount: Array.isArray(tools) ? tools.length : 0, sampleInput: summarizeInputItems(input) });
 	const upstreamBody = {
 		model,
 		instructions,
@@ -261,7 +453,8 @@ async function handleChatCompletions(body, client) {
 		...(typeof body.parallel_tool_calls === "boolean" ? { parallel_tool_calls: body.parallel_tool_calls } : {}),
 	};
 
-	const responsesResult = await callUpstreamResponses(client, upstreamBody);
+	const requestContextWithModel = { ...requestContext, model };
+	const responsesResult = await callUpstreamResponses(client, upstreamBody, requestContextWithModel);
 	const chatResponse = toChatCompletionResponse(responsesResult, model);
 
 	const toolCalls = chatResponse.choices[0].message.tool_calls;
@@ -269,22 +462,19 @@ async function handleChatCompletions(body, client) {
 		rememberTurn(model, toolCalls.map((t) => t.id), responsesResult.output ?? []);
 	}
 
-	if (process.env.PROXY_VERBOSE === "1") {
-		const outputTypes = (responsesResult.output ?? []).map((o) => o.type);
-		console.log(
-			JSON.stringify({
-				dbg: "turn",
-				inputMessageCount: body.messages.length,
-				inputItemCount: input.length,
-				outputTypes,
-				status: responsesResult.status,
-				incompleteReason: responsesResult.incomplete_details,
-				contentLen: (chatResponse.choices[0].message.content ?? "").length,
-				toolCallCount: toolCalls?.length ?? 0,
-				usage: responsesResult.usage,
-			}),
-		);
-	}
+	const outputTypes = (responsesResult.output ?? []).map((o) => o.type);
+	log("info", "chat_completion_end", {
+		requestId: requestContext.requestId,
+		responseId: responsesResult.id,
+		model,
+		status: responsesResult.status,
+		incompleteReason: responsesResult.incomplete_details,
+		finishReason: chatResponse.choices[0].finish_reason,
+		contentLen: (chatResponse.choices[0].message.content ?? "").length,
+		toolCallCount: toolCalls?.length ?? 0,
+		usage: responsesResult.usage,
+		outputTypes,
+	});
 
 	return chatResponse;
 }
@@ -309,9 +499,31 @@ function writeChatCompletionChunkStream(res, chatResponse) {
 }
 
 async function readJsonBody(req) {
+	const requestId = req.__requestId || `req-${randomUUID()}`;
 	const chunks = [];
-	for await (const chunk of req) chunks.push(chunk);
-	return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+	let totalBytes = 0;
+	for await (const chunk of req) {
+		totalBytes += chunk?.byteLength || 0;
+		chunks.push(chunk);
+	}
+	const text = Buffer.concat(chunks).toString("utf8");
+	log("debug", "request_body_read", { requestId, totalBytes, lineCount: text.split("\n").length });
+	try {
+		const body = JSON.parse(text);
+		log("debug", "request_body_parsed", {
+			requestId,
+			descriptor: describeSseBody(body),
+			truncatedModelText: body?.messages?.[0]?.content ? clamp(body.messages[0].content, 180) : null,
+		});
+		return body;
+	} catch (error) {
+		log("error", "request_body_parse_error", {
+			requestId,
+			raw: clamp(text, 300),
+			error: error?.message,
+		});
+		throw error;
+	}
 }
 
 async function main() {
@@ -319,9 +531,23 @@ async function main() {
 
 	const server = createServer(async (req, res) => {
 		try {
+			const requestId = extractRequestId(req);
+			req.__requestId = requestId;
+			log("info", "request_started", {
+				requestId,
+				method: req.method,
+				url: req.url,
+				remoteAddress: req.socket.remoteAddress,
+			});
 			if (req.method === "POST" && req.url === "/v1/chat/completions") {
 				const body = await readJsonBody(req);
-				const result = await handleChatCompletions(body, client);
+				const result = await handleChatCompletions(body, client, {
+					requestId,
+					startedAt: Date.now(),
+					remoteAddress: req.socket.remoteAddress,
+					stream: body.stream,
+					model: body.model,
+				});
 				if (body.stream === true) {
 					writeChatCompletionChunkStream(res, result);
 				} else {
@@ -347,9 +573,12 @@ async function main() {
 			res.writeHead(404, { "Content-Type": "application/json" });
 			res.end(JSON.stringify({ error: { message: "Route not found.", type: "not_found_error" } }));
 		} catch (error) {
+			const openaiError = error?.openaiError || buildUpstreamErrorResponse(error, "Unexpected server error.").error;
+			const statusCode = error?.status && error.status >= 400 && error.status < 600 ? error.status : 500;
+			log("error", "request_failed", { requestId: req.__requestId, error: error instanceof Error ? error.message : "Unexpected server error." });
 			console.error("request failed:", error);
-			res.writeHead(error.status && error.status >= 400 && error.status < 600 ? error.status : 500, { "Content-Type": "application/json" });
-			res.end(JSON.stringify({ error: { message: error instanceof Error ? error.message : "Unexpected server error.", type: "server_error" } }));
+			res.writeHead(statusCode, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ error: openaiError }));
 		}
 	});
 
