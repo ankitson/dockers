@@ -28,7 +28,20 @@ or two, anything else the image needs at build time.
 2. In whichever `docker-compose.*.yml` consumes it, point `build.context` at
    `/projects/dockers/<name>` (absolute path keeps it independent of the
    consumer's cwd).
-3. Build + recreate: `cd ~/hroot/<consumer> && just build <service> && just up -d <service>`.
+3. Build + recreate: `cd ~/hroot/<consumer> && docker compose build --pull --no-cache <service> && docker compose up -d --no-deps <service>`.
+
+## Patch stacks
+
+Local source/package deltas are tracked in [`patches.toml`](patches.toml) and
+documented in [`PATCHES.md`](PATCHES.md). Use `jj` or Git to author stacks, but
+keep Docker builds consuming plain patch files or fail-closed patch scripts.
+
+Useful checks:
+
+```sh
+just patches-list
+just patches-check
+```
 
 ## Why a separate repo?
 

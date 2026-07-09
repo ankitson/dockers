@@ -1,0 +1,60 @@
+version = 1
+
+[policy]
+authoring = "jj"
+build_artifact = "plain files consumed by Dockerfiles"
+rule = "Patch code at image build time; runtime entrypoints may only reconcile mutable state."
+
+[[stacks]]
+id = "bifrost-dynamic"
+owner_path = "bifrost-dynamic"
+consumer = "devserver:bifrost"
+upstream_kind = "git"
+upstream = "https://github.com/maximhq/bifrost.git"
+upstream_ref_arg = "BIFROST_REF"
+notes = "Local Bifrost source build plus plugins. Git patches apply after checkout and before compile."
+
+[[stacks.patches]]
+id = "bifrost-list-models-partial-timeout"
+type = "git-apply"
+path = "bifrost-dynamic/patches/list-models-partial-timeout.patch"
+status = "active"
+reason = "Avoid failing the whole model-list request when one provider stalls."
+applied_by = ["bifrost-dynamic/Dockerfile"]
+remove_when = "Upstream exposes partial results or equivalent timeout behavior."
+
+[[stacks.patches]]
+id = "bifrost-add-reasoning-content-field"
+type = "git-apply"
+path = "bifrost-dynamic/patches/add-reasoning-content-field.patch"
+status = "active"
+reason = "Add ReasoningContent output field so the normalizer plugin can serve clients that only read the OpenAI-standard reasoning_content field name."
+applied_by = ["bifrost-dynamic/Dockerfile"]
+remove_when = "Upstream adds ReasoningContent to ChatStreamResponseChoiceDelta (or renames Reasoning's JSON tag to reasoning_content)."
+
+[[stacks]]
+id = "openclaw"
+owner_path = "openclaw"
+consumer = "devserver:openclaw"
+upstream_kind = "npm"
+upstream = "openclaw"
+upstream_ref_arg = "OPENCLAW_VERSION"
+notes = "Patches are fail-closed package/image fixups applied after npm install."
+
+[[stacks.patches]]
+id = "openclaw-bifrost-embedding-passthrough"
+type = "package-patch-script"
+path = "openclaw/patches/patch-openclaw-bifrost-embeddings.mjs"
+status = "active"
+reason = "Send embedding input_type through Bifrost's extra_params passthrough channel."
+applied_by = ["openclaw/Dockerfile"]
+remove_when = "OpenClaw natively supports extra_params for OpenAI-compatible embeddings."
+
+[[stacks.patches]]
+id = "openclaw-export-session-assets"
+type = "image-patch-script"
+path = "openclaw/patches/patch-export-session-assets.sh"
+status = "active"
+reason = "Work around packaged export-session asset path mismatch."
+applied_by = ["openclaw/Dockerfile"]
+remove_when = "OpenClaw package ships dist/export-html where the handler expects it."

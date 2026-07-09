@@ -1,5 +1,19 @@
 # Dockers Changelog
 
+## 2026-07-06
+
+### Bifrost dynamic: partial model-list fanout
+- Updated `bifrost-dynamic` to upstream Bifrost `transports/v1.6.2`.
+- Added a local source patch that bounds all-provider model-list collection at 10 seconds, returns available models, and reports provider statuses for failed or timed-out providers.
+- Added OpenAI-compatible `bifrost.partial` and `bifrost.provider_statuses` metadata for `/openai/v1/models`.
+- Fixed the Docker build so the transport binary and custom Go plugins compile against the same patched local core module.
+
+### Patch stack structure
+- Added `patches.toml` as the central manifest for local image/source patch stacks.
+- Added `PATCHES.md` and per-image patch notes for the `jj` authoring plus plain-file Docker build workflow.
+- Added `bin/patch-stack.py` with `just patches-list` and `just patches-check` structural validation commands.
+- Moved the OpenClaw embedding patch under `openclaw/patches/` and made the export-session asset workaround an explicit patch script.
+
 ## 2026-07-01
 
 ### OpenClaw Bifrost embedding passthrough patch

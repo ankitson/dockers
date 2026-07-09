@@ -1,5 +1,33 @@
 # Dockers Notes
 
+## 2026-07-06
+
+### Bifrost dynamic partial model-list patch
+#### Goal
+- Make the custom Bifrost image tolerate a slow provider during all-provider model discovery.
+#### Decision
+- Moved `bifrost-dynamic` from upstream `transports/v1.6.0` to `transports/v1.6.2`.
+- Added `bifrost-dynamic/patches/list-models-partial-timeout.patch`.
+- The patch makes `ListAllModels` collect provider fanout results for 10 seconds, return available models, and record provider statuses for success, failure, and timeout.
+- The OpenAI-compatible list response keeps `object` and `data`, and adds optional top-level `bifrost` metadata for partial/provider status details.
+- The Docker build now compiles the main transport and both local plugins against the same patched `/src/core` module.
+#### Verification
+- `just bifrost-dynamic-build` passes plugin tests and builds `ankit/bifrost-dynamic:latest`.
+- Devserver Bifrost runs v1.6.2 with `model-policy-suffix` and `embedding-task-prefix` active.
+- `/v1/models` and `/openai/v1/models` return in about 10 seconds and mark `unsloth` as timed out while preserving returned model data.
+
+### Patch stack structure
+#### Goal
+- Make local monkey patches discoverable and maintainable without changing any running devserver containers.
+#### Decision
+- Use `jj` as an optional authoring workflow for long-lived upstream patch stacks, but keep Docker builds consuming plain files.
+- Track every local patch in `patches.toml` with owner, upstream, apply point, reason, and removal condition.
+- Keep source/package patch files under each image's `patches/` directory.
+#### Verification
+- `just patches-check` validates manifest structure and patch file presence without building images or touching containers.
+#### Next steps
+- Convert future Git-backed source patches to `git format-patch` output and apply them with `git am` where the upstream checkout supports it.
+
 ## 2026-07-01
 
 ### OpenClaw image patch for Bifrost embedding passthrough

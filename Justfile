@@ -15,3 +15,9 @@ bifrost-plugin-test:
 
 bifrost-dynamic-build: bifrost-plugin-test
   docker build --tag {{BIFROST_DYNAMIC_IMAGE}} ./bifrost-dynamic
+
+patches-list:
+  uv run python bin/patch-stack.py list
+
+patches-check:
+  uv run python bin/patch-stack.py check
