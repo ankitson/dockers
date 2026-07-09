@@ -1,7 +1,7 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-IMAGE := "ankit/mcpproxy:0.35.0"
-BIFROST_DYNAMIC_IMAGE := "ankit/bifrost-dynamic:local"
+IMAGE := "ankit/mcpproxy:latest"
+BIFROST_DYNAMIC_IMAGE := "ankit/bifrost-dynamic:latest"
 
 build:
   docker build --tag {{IMAGE}} ./mcpproxy

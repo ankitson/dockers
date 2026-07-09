@@ -16,8 +16,9 @@ RUN apt-get purge -y nodejs npm \
  && npm install -g pnpm bun typescript
 
 # Install OpenClaw globally as root so the binary lands in the image-wide
-# node_modules (on ankit's PATH). Pinned for reproducibility — bump deliberately.
-ARG OPENCLAW_VERSION=2026.5.28
+# node_modules (on ankit's PATH). Defaults to npm latest; pass an explicit
+# version only for rollback/repro.
+ARG OPENCLAW_VERSION=latest
 ARG OPENCLAW_CODEX_VERSION=${OPENCLAW_VERSION}
 RUN npm install -g openclaw@${OPENCLAW_VERSION} \
  && openclaw --version

@@ -2,14 +2,23 @@
 
 FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS downloader
 
-ARG MCPPROXY_VERSION=0.35.0
-ARG MCPPROXY_SHA256=5fd8592469117fb4656a8b4d335bdf651219f210d4911a5849b6dcc510b2f97c
+ARG MCPPROXY_VERSION=latest
+ARG MCPPROXY_SHA256=
 
 RUN apk add --no-cache ca-certificates curl tar \
-  && curl --fail --location --silent --show-error \
-    "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v${MCPPROXY_VERSION}/mcpproxy-${MCPPROXY_VERSION}-linux-amd64.tar.gz" \
-    --output /tmp/mcpproxy.tar.gz \
-  && echo "${MCPPROXY_SHA256}  /tmp/mcpproxy.tar.gz" | sha256sum -c - \
+  && set -eu; \
+    if [ "${MCPPROXY_VERSION}" = "latest" ]; then \
+      resolved_version="latest"; \
+      download_url="https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-linux-amd64.tar.gz"; \
+    else \
+      resolved_version="${MCPPROXY_VERSION}"; \
+      download_url="https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v${resolved_version}/mcpproxy-${resolved_version}-linux-amd64.tar.gz"; \
+    fi; \
+    echo "Downloading MCPProxy ${resolved_version} from ${download_url}"; \
+    curl --fail --location --silent --show-error "${download_url}" --output /tmp/mcpproxy.tar.gz; \
+    if [ -n "${MCPPROXY_SHA256}" ]; then \
+      echo "${MCPPROXY_SHA256}  /tmp/mcpproxy.tar.gz" | sha256sum -c -; \
+    fi \
   && tar -xzf /tmp/mcpproxy.tar.gz -C /tmp \
   && install -m 0755 /tmp/mcpproxy /usr/local/bin/mcpproxy
 

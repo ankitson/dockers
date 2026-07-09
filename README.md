@@ -13,7 +13,9 @@ or two, anything else the image needs at build time.
   CDP-driven browser; any agent on the network can drive it. Based on
   `debian:bookworm-slim`. Consumed by `~/hroot/devserver/docker-compose.yml`
   (service `agent-browser`).
-- `mcpproxy/` — pinned MCPProxy personal-edition gateway image. Seeds its
+- `mcpproxy/` — MCPProxy personal-edition gateway image. Defaults to the latest
+  upstream release at rebuild time, with optional version/checksum build args
+  for rollback/repro. Seeds its
   configuration once and persists live OAuth and token state under `/data`.
   Consumed by `~/hroot/devserver/docker-compose.yml` (service `mcpproxy`).
 - `bifrost-dynamic/` — local Bifrost build with dynamic Go plugin support and
