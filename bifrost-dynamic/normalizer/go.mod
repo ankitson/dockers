@@ -1,4 +1,4 @@
-module ankit/bifrost-embedding-task-prefix
+module ankit/bifrost-normalizer
 
 go 1.26.4
 

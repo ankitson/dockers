@@ -1,0 +1,270 @@
+diff --git a/core/bifrost.go b/core/bifrost.go
+index 5d512f9c8..3b68afbbe 100644
+--- a/core/bifrost.go
++++ b/core/bifrost.go
+@@ -398,6 +398,8 @@ func (bifrost *Bifrost) ReloadConfig(config schemas.BifrostConfig) error {
+
+ // PUBLIC API METHODS
+
++var listAllModelsCollectionTimeout = 10 * time.Second
++
+ // ListModelsRequest sends a list models request to the specified provider.
+ func (bifrost *Bifrost) ListModelsRequest(ctx *schemas.BifrostContext, req *schemas.BifrostListModelsRequest) (*schemas.BifrostListModelsResponse, *schemas.BifrostError) {
+ 	if req == nil {
+@@ -477,7 +479,7 @@ func (bifrost *Bifrost) ListAllModels(ctx *schemas.BifrostContext, req *schemas.
+ 	}
+
+ 	results := make(chan providerResult, len(providerKeys))
+-	var wg sync.WaitGroup
++	startedProviders := 0
+
+ 	// Launch concurrent requests for all providers
+ 	for _, providerKey := range providerKeys {
+@@ -485,11 +487,11 @@ func (bifrost *Bifrost) ListAllModels(ctx *schemas.BifrostContext, req *schemas.
+ 			continue
+ 		}
+
+-		wg.Add(1)
++		startedProviders++
+ 		go func(providerKey schemas.ModelProvider) {
+-			defer wg.Done()
+-
+-			providerCtx := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
++			// Detach provider probes from the request context. List-all is best effort:
++			// slow providers report later into the buffered channel and are ignored.
++			providerCtx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+ 			providerCtx.SetValue(schemas.BifrostContextKeyRequestID, uuid.New().String())
+
+ 			providerModels := make([]schemas.Model, 0)
+@@ -535,9 +537,9 @@ func (bifrost *Bifrost) ListAllModels(ctx *schemas.BifrostContext, req *schemas.
+ 						strings.Contains(errMsg, "not supported") ||
+ 						errType == "provider_blocked"
+ 					if !isExpected {
+-						providerErr = bifrostErr
+ 						bifrost.logger.Warn("failed to list models for provider %s: %s", providerKey, bifrostErr.GetErrorString())
+ 					}
++					providerErr = bifrostErr
+ 					// Collect key statuses from error (failure case)
+ 					if len(bifrostErr.ExtraFields.KeyStatuses) > 0 {
+ 						providerKeyStatuses = append(providerKeyStatuses, bifrostErr.ExtraFields.KeyStatuses...)
+@@ -573,24 +575,57 @@ func (bifrost *Bifrost) ListAllModels(ctx *schemas.BifrostContext, req *schemas.
+ 		}(providerKey)
+ 	}
+
+-	// Wait for all goroutines to complete
+-	wg.Wait()
+-	close(results)
+-
+-	// Accumulate all models and key statuses from all providers
++	// Accumulate all models and key statuses from all providers.
+ 	allModels := make([]schemas.Model, 0)
+ 	allKeyStatuses := make([]schemas.KeyStatus, 0)
++	providerStatuses := make([]schemas.ListModelsProviderStatus, 0, startedProviders)
+ 	var firstError *schemas.BifrostError
++	pendingProviders := make(map[schemas.ModelProvider]struct{}, startedProviders)
++	for _, providerKey := range providerKeys {
++		if strings.TrimSpace(string(providerKey)) != "" {
++			pendingProviders[providerKey] = struct{}{}
++		}
++	}
+
+-	for result := range results {
+-		if len(result.models) > 0 {
+-			allModels = append(allModels, result.models...)
+-		}
+-		if len(result.keyStatuses) > 0 {
+-			allKeyStatuses = append(allKeyStatuses, result.keyStatuses...)
+-		}
+-		if result.err != nil && firstError == nil {
+-			firstError = result.err
++	timer := time.NewTimer(listAllModelsCollectionTimeout)
++	defer timer.Stop()
++
++	for completed := 0; completed < startedProviders; {
++		select {
++		case result := <-results:
++			completed++
++			delete(pendingProviders, result.provider)
++
++			if len(result.models) > 0 {
++				allModels = append(allModels, result.models...)
++			}
++			if len(result.keyStatuses) > 0 {
++				allKeyStatuses = append(allKeyStatuses, result.keyStatuses...)
++			}
++			if result.err != nil && firstError == nil {
++				firstError = result.err
++			}
++
++			status := schemas.ListModelsProviderStatus{
++				Provider:   result.provider,
++				Status:     schemas.ListModelsProviderStatusSuccess,
++				ModelCount: len(result.models),
++			}
++			if result.err != nil {
++				status.Status = schemas.ListModelsProviderStatusFailed
++				status.Error = listModelsErrorMessage(result.err)
++			}
++			providerStatuses = append(providerStatuses, status)
++
++		case <-timer.C:
++			for provider := range pendingProviders {
++				providerStatuses = append(providerStatuses, schemas.ListModelsProviderStatus{
++					Provider: provider,
++					Status:   schemas.ListModelsProviderStatusTimeout,
++					Error:    fmt.Sprintf("provider did not finish list_models within %s", listAllModelsCollectionTimeout),
++				})
++			}
++			completed = startedProviders
+ 		}
+ 	}
+
+@@ -608,8 +643,9 @@ func (bifrost *Bifrost) ListAllModels(ctx *schemas.BifrostContext, req *schemas.
+
+ 	// Return aggregated response with accumulated latency and key statuses
+ 	response := &schemas.BifrostListModelsResponse{
+-		Data:        allModels,
+-		KeyStatuses: allKeyStatuses,
++		Data:             allModels,
++		KeyStatuses:      allKeyStatuses,
++		ProviderStatuses: providerStatuses,
+ 		ExtraFields: schemas.BifrostResponseExtraFields{
+ 			RequestType: schemas.ListModelsRequest,
+ 			Latency:     time.Since(startTime).Milliseconds(),
+@@ -621,6 +657,21 @@ func (bifrost *Bifrost) ListAllModels(ctx *schemas.BifrostContext, req *schemas.
+ 	return response, nil
+ }
+
++func listModelsErrorMessage(err *schemas.BifrostError) string {
++	if err == nil {
++		return ""
++	}
++	if err.Error != nil {
++		if err.Error.Message != "" {
++			return err.Error.Message
++		}
++		if err.Error.Error != nil {
++			return err.Error.Error.Error()
++		}
++	}
++	return err.GetErrorString()
++}
++
+ func filterProvidersByContext(ctx *schemas.BifrostContext, providerKeys []schemas.ModelProvider) []schemas.ModelProvider {
+ 	if ctx == nil {
+ 		return providerKeys
+diff --git a/core/providers/openai/models.go b/core/providers/openai/models.go
+index 691a82606..2ccf6e67d 100644
+--- a/core/providers/openai/models.go
++++ b/core/providers/openai/models.go
+@@ -59,8 +59,21 @@ func ToOpenAIListModelsResponse(response *schemas.BifrostListModelsResponse) *Op
+ 		return nil
+ 	}
+ 	openaiResponse := &OpenAIListModelsResponse{
++		Object: "list",
+ 		Data: make([]OpenAIModel, 0, len(response.Data)),
+ 	}
++	if len(response.ProviderStatuses) > 0 {
++		metadata := &OpenAIListModelsMetadata{
++			ProviderStatuses: response.ProviderStatuses,
++		}
++		for _, status := range response.ProviderStatuses {
++			if status.Status != schemas.ListModelsProviderStatusSuccess {
++				metadata.Partial = true
++				break
++			}
++		}
++		openaiResponse.Bifrost = metadata
++	}
+ 	for _, model := range response.Data {
+ 		openaiModel := OpenAIModel{
+ 			ID:     model.ID,
+diff --git a/core/providers/openai/types.go b/core/providers/openai/types.go
+index f5fe37f64..ecf17da84 100644
+--- a/core/providers/openai/types.go
++++ b/core/providers/openai/types.go
+@@ -916,8 +916,14 @@ type OpenAIModel struct {
+
+ // OpenAIListModelsResponse represents an OpenAI list models response
+ type OpenAIListModelsResponse struct {
+-	Object string        `json:"object"`
+-	Data   []OpenAIModel `json:"data"`
++	Object  string                    `json:"object"`
++	Data    []OpenAIModel             `json:"data"`
++	Bifrost *OpenAIListModelsMetadata `json:"bifrost,omitempty"`
++}
++
++type OpenAIListModelsMetadata struct {
++	Partial          bool                               `json:"partial,omitempty"`
++	ProviderStatuses []schemas.ListModelsProviderStatus `json:"provider_statuses,omitempty"`
+ }
+
+ // OpenAIImageGenerationRequest is the struct for Image Generation requests by OpenAI.
+diff --git a/core/schemas/models.go b/core/schemas/models.go
+index f36cc2deb..a744f0bfa 100644
+--- a/core/schemas/models.go
++++ b/core/schemas/models.go
+@@ -19,6 +19,23 @@ type ListModelsByKeyResult struct {
+ 	KeyID    string
+ }
+
++type ListModelsProviderStatusType string
++
++const (
++	ListModelsProviderStatusSuccess ListModelsProviderStatusType = "success"
++	ListModelsProviderStatusFailed  ListModelsProviderStatusType = "failed"
++	ListModelsProviderStatusTimeout ListModelsProviderStatusType = "timeout"
++)
++
++// ListModelsProviderStatus reports best-effort all-provider list-model fanout
++// status without changing the core OpenAI models list contract.
++type ListModelsProviderStatus struct {
++	Provider   ModelProvider                `json:"provider"`
++	Status     ListModelsProviderStatusType `json:"status"`
++	Error      string                       `json:"error,omitempty"`
++	ModelCount int                          `json:"model_count,omitempty"`
++}
++
+ // KeyStatus represents the status of model listing for a specific key
+ type KeyStatus struct {
+ 	KeyID    string        `json:"key_id"`   // Empty for keyless providers
+@@ -74,7 +91,8 @@ type BifrostListModelsResponse struct {
+ 	NextPageToken string                     `json:"next_page_token,omitempty"` // Token to retrieve next page
+
+ 	// Key-level status tracking for multi-key providers
+-	KeyStatuses []KeyStatus `json:"key_statuses,omitempty"`
++	KeyStatuses      []KeyStatus                `json:"key_statuses,omitempty"`
++	ProviderStatuses []ListModelsProviderStatus `json:"provider_statuses,omitempty"`
+
+ 	// Anthropic specific fields
+ 	FirstID *string `json:"-"`
+@@ -108,10 +126,11 @@ func (response *BifrostListModelsResponse) ApplyPagination(pageSize int, pageTok
+ 	if offset >= totalItems {
+ 		// Return empty page, no next token
+ 		return &BifrostListModelsResponse{
+-			Data:          []Model{},
+-			ExtraFields:   response.ExtraFields,
+-			NextPageToken: "",
+-			KeyStatuses:   response.KeyStatuses,
++			Data:             []Model{},
++			ExtraFields:      response.ExtraFields,
++			NextPageToken:    "",
++			KeyStatuses:      response.KeyStatuses,
++			ProviderStatuses: response.ProviderStatuses,
+ 		}
+ 	}
+
+@@ -123,9 +142,10 @@ func (response *BifrostListModelsResponse) ApplyPagination(pageSize int, pageTok
+ 	paginatedData := response.Data[offset:endIndex]
+
+ 	paginatedResponse := &BifrostListModelsResponse{
+-		Data:        paginatedData,
+-		ExtraFields: response.ExtraFields,
+-		KeyStatuses: response.KeyStatuses,
++		Data:             paginatedData,
++		ExtraFields:      response.ExtraFields,
++		KeyStatuses:      response.KeyStatuses,
++		ProviderStatuses: response.ProviderStatuses,
+ 	}
+
+ 	if endIndex < totalItems {

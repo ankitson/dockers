@@ -1,0 +1,57 @@
+diff --git a/core/providers/utils/utils.go b/core/providers/utils/utils.go
+index 6ee989885..bb28d1e06 100644
+--- a/core/providers/utils/utils.go
++++ b/core/providers/utils/utils.go
+@@ -1281,7 +1281,11 @@ func CheckContextAndGetRequestBody(ctx context.Context, request RequestBodyGette
+ 			return nil, NewBifrostOperationError(schemas.ErrProviderRequestMarshal, err)
+ 		}
+ 		// Merge ExtraParams into the JSON if passthrough is enabled
+-		if ctx.Value(schemas.BifrostContextKeyPassthroughExtraParams) != nil && ctx.Value(schemas.BifrostContextKeyPassthroughExtraParams) == true {
++		// or if the provider is a custom provider (which may need
++		// provider-specific params like chat_template_kwargs).
++		isCustomProvider, _ := ctx.Value(schemas.BifrostContextKeyIsCustomProvider).(bool)
++		isPassthrough := ctx.Value(schemas.BifrostContextKeyPassthroughExtraParams) != nil && ctx.Value(schemas.BifrostContextKeyPassthroughExtraParams) == true
++		if isPassthrough || isCustomProvider {
+ 			extraParams := convertedBody.GetExtraParams()
+ 			if len(extraParams) > 0 {
+ 				// Use order-preserving merge to avoid destroying key ordering in
+diff --git a/core/schemas/chatcompletions.go b/core/schemas/chatcompletions.go
+index 96f3fd102..509e66d9e 100644
+--- a/core/schemas/chatcompletions.go
++++ b/core/schemas/chatcompletions.go
+@@ -246,9 +246,11 @@ func (cp *ChatParameters) UnmarshalJSON(data []byte) error {
+ 	// Aux struct adds flat reasoning_* shorthands for decoding
+ 	var aux struct {
+ 		*Alias
+-		ReasoningEffort    *string `json:"reasoning_effort"` // only for input
+-		ReasoningMaxTokens *int    `json:"reasoning_max_tokens"`
+-		ReasoningDisplay   *string `json:"reasoning_display"`
++		ReasoningEffort    *string                `json:"reasoning_effort"` // only for input
++		ReasoningMaxTokens *int                   `json:"reasoning_max_tokens"`
++		ReasoningDisplay   *string                `json:"reasoning_display"`
++		ChatTemplateKwargs map[string]interface{} `json:"chat_template_kwargs"`
++		EnableThinking      *bool                  `json:"enable_thinking"`
+ 	}
+ 
+ 	aux.Alias = (*Alias)(cp)
+@@ -287,6 +289,20 @@ func (cp *ChatParameters) UnmarshalJSON(data []byte) error {
+ 		}
+ 	}
+ 	// ExtraParams etc. are already handled by the alias
++	// Merge chat_template_kwargs into ExtraParams so it survives the Bifrost
++	// pipeline and reaches custom providers (e.g. llama.cpp-based backends).
++	if aux.ChatTemplateKwargs != nil {
++		if cp.ExtraParams == nil {
++			cp.ExtraParams = make(map[string]interface{})
++		}
++		cp.ExtraParams["chat_template_kwargs"] = aux.ChatTemplateKwargs
++	}
++	if aux.EnableThinking != nil {
++		if cp.ExtraParams == nil {
++			cp.ExtraParams = make(map[string]interface{})
++		}
++		cp.ExtraParams["enable_thinking"] = *aux.EnableThinking
++	}
+ 	return nil
+ }
+ 

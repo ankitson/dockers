@@ -1,5 +1,5 @@
-ARG BIFROST_REF=transports/v1.6.0
-ARG VERSION=1.6.0
+ARG BIFROST_REF=transports/v1.6.3
+ARG VERSION=1.6.3
 
 FROM node:25-alpine3.23 AS ui-builder
 ARG BIFROST_REF
@@ -16,11 +16,15 @@ ARG VERSION
 WORKDIR /src
 RUN apk add --no-cache git ca-certificates gcc musl-dev sqlite-dev binutils binutils-gold
 RUN git clone https://github.com/maximhq/bifrost.git . && git checkout "$BIFROST_REF"
+COPY patches/ /patches/
+RUN git apply /patches/list-models-partial-timeout.patch /patches/pass-chat-template-kwargs.patch /patches/add-reasoning-content-field.patch
 COPY --from=ui-builder /src/ui/out ./transports/bifrost-http/ui
 
 ENV CGO_ENABLED=1 GOOS=linux GOWORK=off
 WORKDIR /src/transports
-RUN go mod download
+RUN go mod edit -replace github.com/maximhq/bifrost/core=/src/core && \
+  go mod tidy && \
+  go mod download
 RUN go build \
   -ldflags="-w -s -X main.Version=v${VERSION}" \
   -a -trimpath \
@@ -38,6 +42,12 @@ WORKDIR /plugin-src
 RUN go mod edit -replace github.com/maximhq/bifrost/core=/src/core && \
   go mod tidy && \
   go build -buildmode=plugin -trimpath -ldflags="-w -s" -o /out/plugins/embedding-task-prefix.so .
+
+COPY normalizer/ /plugin-src/
+WORKDIR /plugin-src
+RUN go mod edit -replace github.com/maximhq/bifrost/core=/src/core && \
+  go mod tidy && \
+  go build -buildmode=plugin -trimpath -ldflags="-w -s" -o /out/plugins/normalizer.so .
 
 FROM alpine:3.23.4
 WORKDIR /app

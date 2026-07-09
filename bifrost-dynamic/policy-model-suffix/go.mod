@@ -2,7 +2,7 @@ module ankit/bifrost-policy-model-suffix
 
 go 1.26.4
 
-require github.com/maximhq/bifrost/core v1.6.0
+require github.com/maximhq/bifrost/core v1.6.2
 
 require (
 	github.com/andybalholm/brotli v1.2.1 // indirect
