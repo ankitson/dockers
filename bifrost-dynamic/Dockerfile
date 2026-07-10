@@ -31,23 +31,25 @@ RUN go build \
   -o /out/main \
   ./bifrost-http
 
-COPY policy-model-suffix/ /plugin-src/
-WORKDIR /plugin-src
-RUN go mod edit -replace github.com/maximhq/bifrost/core=/src/core && \
-  go mod tidy && \
-  go build -buildmode=plugin -trimpath -ldflags="-w -s" -o /out/plugins/model-policy-suffix.so .
+# Build plugins within the transport module so they share the exact same
+# go.mod / go.sum resolution as the main binary.  This prevents the
+# "plugin was built with a different version of package" error at load time.
+COPY policy-model-suffix /src/transports/plugins/policy-model-suffix/
+COPY embedding-task-prefix /src/transports/plugins/embedding-task-prefix/
+COPY normalizer /src/transports/plugins/normalizer/
+RUN rm -f /src/transports/plugins/*/go.mod /src/transports/plugins/*/go.sum
 
-COPY embedding-task-prefix/ /plugin-src/
-WORKDIR /plugin-src
-RUN go mod edit -replace github.com/maximhq/bifrost/core=/src/core && \
-  go mod tidy && \
-  go build -buildmode=plugin -trimpath -ldflags="-w -s" -o /out/plugins/embedding-task-prefix.so .
+RUN go build -buildmode=plugin -trimpath -ldflags="-w -s" \
+  -o /out/plugins/model-policy-suffix.so \
+  ./plugins/policy-model-suffix/
 
-COPY normalizer/ /plugin-src/
-WORKDIR /plugin-src
-RUN go mod edit -replace github.com/maximhq/bifrost/core=/src/core && \
-  go mod tidy && \
-  go build -buildmode=plugin -trimpath -ldflags="-w -s" -o /out/plugins/normalizer.so .
+RUN go build -buildmode=plugin -trimpath -ldflags="-w -s" \
+  -o /out/plugins/embedding-task-prefix.so \
+  ./plugins/embedding-task-prefix/
+
+RUN go build -buildmode=plugin -trimpath -ldflags="-w -s" \
+  -o /out/plugins/normalizer.so \
+  ./plugins/normalizer/
 
 FROM alpine:3.23.4
 WORKDIR /app

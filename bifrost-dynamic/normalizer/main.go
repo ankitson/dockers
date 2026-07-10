@@ -1,8 +1,40 @@
 package main
 
-import "github.com/maximhq/bifrost/core/schemas"
+import (
+	"encoding/json"
 
-func Init(config any) error { return nil }
+	"github.com/maximhq/bifrost/core/schemas"
+)
+
+// providers this plugin normalizes reasoning for. Populated from the plugin
+// config's `providers` array at Init; defaults to {"unsloth"} when unset so
+// existing behavior is preserved. Adding a provider is a config edit, not a
+// rebuild.
+var normalizeProviders = map[string]bool{"unsloth": true}
+
+type normalizerConfig struct {
+	Providers []string `json:"providers"`
+}
+
+func Init(config any) error {
+	if config == nil {
+		return nil
+	}
+	raw, err := json.Marshal(config)
+	if err != nil {
+		return nil // keep default on malformed config
+	}
+	var cfg normalizerConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil || len(cfg.Providers) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(cfg.Providers))
+	for _, p := range cfg.Providers {
+		set[p] = true
+	}
+	normalizeProviders = set
+	return nil
+}
 
 func GetName() string { return "normalizer" }
 
@@ -21,7 +53,7 @@ func PostLLMHook(_ *schemas.BifrostContext, resp *schemas.BifrostResponse, bifro
 		return resp, bifrostErr, nil
 	}
 	provider := resp.ChatResponse.ExtraFields.Provider
-	if provider != "unsloth" {
+	if !normalizeProviders[string(provider)] {
 		return resp, bifrostErr, nil
 	}
 
@@ -52,7 +84,7 @@ func HTTPTransportStreamChunkHook(_ *schemas.BifrostContext, _ *schemas.HTTPRequ
 	}
 
 	provider := chunk.BifrostChatResponse.ExtraFields.Provider
-	if provider != "unsloth" {
+	if !normalizeProviders[string(provider)] {
 		return chunk, nil
 	}
 
