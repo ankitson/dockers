@@ -479,6 +479,74 @@ async function handleChatCompletions(body, client, requestContext = {}) {
 	return chatResponse;
 }
 
+async function handleResponses(body, client, requestContext = {}) {
+	const model = requestContext.model || body.model || "gpt-5.4";
+	log("info", "responses_start", {
+		requestId: requestContext.requestId,
+		model,
+		stream: body.stream,
+		reasoningEffort: body.reasoning?.effort ?? body.reasoning_effort,
+		inputCount: Array.isArray(body.input) ? body.input.length : 0,
+		toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
+	});
+	const reasoning = body.include?.includes("reasoning.encrypted_content") ? { effort: body.reasoning?.effort, summary: "auto" } : undefined;
+	const normalizedInput = typeof body.input === "string"
+		? [{ role: "user", content: body.input }]
+		: body.input;
+	const upstreamBody = {
+		model,
+		...(body.instructions ? { instructions: body.instructions } : {}),
+		...(normalizedInput ? { input: normalizedInput } : {}),
+		store: false,
+		...(body.tools ? { tools: body.tools } : {}),
+		...(body.tool_choice ? { tool_choice: body.tool_choice } : {}),
+		...(reasoning ? { include: ["reasoning.encrypted_content"], reasoning } : {}),
+		...(typeof body.parallel_tool_calls === "boolean" ? { parallel_tool_calls: body.parallel_tool_calls } : {}),
+		...(body.max_output_tokens ? { max_output_tokens: body.max_output_tokens } : {}),
+		...(body.temperature != null ? { temperature: body.temperature } : {}),
+		...(body.top_p != null ? { top_p: body.top_p } : {}),
+	};
+	const requestContextWithModel = { ...requestContext, model };
+	const responsesResult = await callUpstreamResponses(client, upstreamBody, requestContextWithModel);
+	const toolCalls = (responsesResult.output ?? []).filter((o) => o.type === "function_call");
+	if (toolCalls.length > 0) {
+		rememberTurn(model, toolCalls.map((t) => t.call_id), responsesResult.output ?? []);
+	}
+	log("info", "responses_end", {
+		requestId: requestContext.requestId,
+		responseId: responsesResult.id,
+		model,
+		status: responsesResult.status,
+		outputTypes: (responsesResult.output ?? []).map((o) => o.type),
+		usage: responsesResult.usage,
+	});
+	return responsesResult;
+}
+
+function writeResponsesChunkStream(res, responsesResult) {
+	res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+	const emit = (event, data) => {
+		res.write(`event: ${event}\ndata: ${JSON.stringify({ type: event, ...data })}\n\n`);
+	};
+	emit("response.created", { response: { id: responsesResult.id, status: "in_progress" } });
+	for (let i = 0; i < (responsesResult.output ?? []).length; i++) {
+		const item = responsesResult.output[i];
+		emit("response.output_item.added", { output_index: i, item });
+		if (item.type === "message") {
+			for (let j = 0; j < (item.content ?? []).length; j++) {
+				const part = item.content[j];
+				emit("response.content_part.added", { output_index: i, content_index: j, part });
+				if (part.type === "output_text") {
+					emit("response.output_text.done", { output_index: i, content_index: j, text: part.text });
+				}
+			}
+		}
+		emit("response.output_item.done", { output_index: i, item });
+	}
+	emit("response.completed", { response: responsesResult });
+	res.end();
+}
+
 /** Bifrost/openclaw request stream:true on the Chat Completions side even though we
  * collect the full upstream response before replying. Emit it as a single-chunk SSE
  * stream so streaming clients get a valid response shape instead of an error. */
@@ -539,6 +607,23 @@ async function main() {
 				url: req.url,
 				remoteAddress: req.socket.remoteAddress,
 			});
+			if (req.method === "POST" && req.url === "/v1/responses") {
+				const body = await readJsonBody(req);
+				const result = await handleResponses(body, client, {
+					requestId,
+					startedAt: Date.now(),
+					remoteAddress: req.socket.remoteAddress,
+					stream: body.stream,
+					model: body.model,
+				});
+				if (body.stream === true) {
+					writeResponsesChunkStream(res, result);
+				} else {
+					res.writeHead(200, { "Content-Type": "application/json" });
+					res.end(JSON.stringify(result));
+				}
+				return;
+			}
 			if (req.method === "POST" && req.url === "/v1/chat/completions") {
 				const body = await readJsonBody(req);
 				const result = await handleChatCompletions(body, client, {
