@@ -28,16 +28,29 @@
 import { execSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
+import os from "node:os";
 import { pathToFileURL } from "node:url";
 
-const globalRoot = execSync("npm root -g").toString().trim();
-const { createCodexOAuthClient, resolveOpenAIOAuthModels } = await import(
-	pathToFileURL(`${globalRoot}/openai-oauth/dist/chunk-2AENSHRT.js`).href
-);
+const TEST_MODE = process.env.CODEX_OAUTH_PROXY_TEST === "1";
+let createCodexOAuthClient;
+let resolveOpenAIOAuthModels;
+if (!TEST_MODE) {
+	const globalRoot = execSync("npm root -g").toString().trim();
+	({ createCodexOAuthClient, resolveOpenAIOAuthModels } = await import(
+		pathToFileURL(`${globalRoot}/openai-oauth/dist/chunk-2AENSHRT.js`).href
+	));
+}
 
 const PORT = Number(process.env.PORT ?? 10531);
 const HOST = process.env.HOST ?? "0.0.0.0";
 const OAUTH_FILE = process.env.OAUTH_FILE ?? "/codex/auth.json";
+const CODEX_VERSION = process.env.CODEX_VERSION ?? (TEST_MODE ? "0.0.0-test" : (() => {
+	const output = execSync("codex --version").toString().trim();
+	const match = output.match(/(?:codex-cli\s+)?([0-9]+(?:\.[0-9]+)+)/);
+	if (!match) throw new Error(`Could not parse installed Codex version from: ${output}`);
+	return match[1];
+})());
+const CODEX_USER_AGENT = process.env.CODEX_USER_AGENT ?? `codex_cli_rs/${CODEX_VERSION} (Linux ${os.release()}; ${os.arch()})`;
 
 const MAX_CACHE_ENTRIES = 2000;
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h — well past any realistic agent-turn gap
@@ -106,7 +119,7 @@ function describeSseBody(body = {}) {
 	return {
 		stream: body.stream,
 		model: body.model,
-		reasoningEffort: body.reasoning_effort,
+		reasoningEffort: resolveReasoningEffort(body),
 		toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
 		parallelToolCalls: body.parallel_tool_calls,
 		messageSummary: summarizeMessages(body.messages),
@@ -143,6 +156,9 @@ function normalizeUpstreamError(errorLike, messageFallback) {
 	} else if (code === "insufficient_quota") {
 		status = 403;
 		openAIType = "insufficient_quota";
+	} else if (type === "usage_limit_reached" || code === "usage_limit_reached") {
+		status = 429;
+		openAIType = "usage_limit_reached";
 	}
 	return {
 		status,
@@ -290,9 +306,16 @@ function toChatCompletionResponse(responsesBody, requestedModel) {
 }
 
 function reasoningEffortFromBody(body) {
-	const effort = body.reasoning_effort;
+	const effort = resolveReasoningEffort(body);
 	if (!effort || effort === "none" || effort === "off") return undefined;
 	return { effort, summary: "auto" };
+}
+
+function resolveReasoningEffort(body = {}) {
+	// Prefer the flat Chat Completions compatibility field when both shapes are
+	// present: existing direct callers may already rely on it as the explicit
+	// override, while Bifrost forwards the nested Responses-style shape.
+	return body.reasoning_effort ?? body.reasoning?.effort;
 }
 
 /**
@@ -432,7 +455,7 @@ async function handleChatCompletions(body, client, requestContext = {}) {
 		requestId: requestContext.requestId,
 		model,
 		stream: body.stream,
-		reasoningEffort: body.reasoning_effort,
+		reasoningEffort: resolveReasoningEffort(body),
 		messageSummary: summarizeMessages(body.messages),
 	});
 	const tools = chatToolsToResponsesTools(body.tools);
@@ -479,33 +502,39 @@ async function handleChatCompletions(body, client, requestContext = {}) {
 	return chatResponse;
 }
 
-async function handleResponses(body, client, requestContext = {}) {
-	const model = requestContext.model || body.model || "gpt-5.4";
+function buildResponsesUpstreamBody(body, model) {
 	log("info", "responses_start", {
-		requestId: requestContext.requestId,
+		requestId: body.__requestId,
 		model,
 		stream: body.stream,
-		reasoningEffort: body.reasoning?.effort ?? body.reasoning_effort,
+		reasoningEffort: resolveReasoningEffort(body),
 		inputCount: Array.isArray(body.input) ? body.input.length : 0,
 		toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
 	});
-	const reasoning = body.include?.includes("reasoning.encrypted_content") ? { effort: body.reasoning?.effort, summary: "auto" } : undefined;
-	const normalizedInput = typeof body.input === "string"
-		? [{ role: "user", content: body.input }]
-		: body.input;
-	const upstreamBody = {
+	const effort = resolveReasoningEffort(body);
+	const reasoning = effort
+		? { effort, summary: body.reasoning?.summary ?? "auto" }
+		: undefined;
+	const normalizedInput = typeof body.input === "string" ? [{ role: "user", content: body.input }] : body.input;
+	return {
 		model,
 		...(body.instructions ? { instructions: body.instructions } : {}),
 		...(normalizedInput ? { input: normalizedInput } : {}),
 		store: false,
 		...(body.tools ? { tools: body.tools } : {}),
 		...(body.tool_choice ? { tool_choice: body.tool_choice } : {}),
-		...(reasoning ? { include: ["reasoning.encrypted_content"], reasoning } : {}),
+		...(body.include?.includes("reasoning.encrypted_content") ? { include: ["reasoning.encrypted_content"] } : {}),
+		...(reasoning ? { reasoning } : {}),
 		...(typeof body.parallel_tool_calls === "boolean" ? { parallel_tool_calls: body.parallel_tool_calls } : {}),
 		...(body.max_output_tokens ? { max_output_tokens: body.max_output_tokens } : {}),
 		...(body.temperature != null ? { temperature: body.temperature } : {}),
 		...(body.top_p != null ? { top_p: body.top_p } : {}),
 	};
+}
+
+async function handleResponses(body, client, requestContext = {}) {
+	const model = requestContext.model || body.model || "gpt-5.4";
+	const upstreamBody = buildResponsesUpstreamBody({ ...body, __requestId: requestContext.requestId }, model);
 	const requestContextWithModel = { ...requestContext, model };
 	const responsesResult = await callUpstreamResponses(client, upstreamBody, requestContextWithModel);
 	const toolCalls = (responsesResult.output ?? []).filter((o) => o.type === "function_call");
@@ -523,28 +552,52 @@ async function handleResponses(body, client, requestContext = {}) {
 	return responsesResult;
 }
 
-function writeResponsesChunkStream(res, responsesResult) {
-	res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
-	const emit = (event, data) => {
-		res.write(`event: ${event}\ndata: ${JSON.stringify({ type: event, ...data })}\n\n`);
-	};
-	emit("response.created", { response: { id: responsesResult.id, status: "in_progress" } });
-	for (let i = 0; i < (responsesResult.output ?? []).length; i++) {
-		const item = responsesResult.output[i];
-		emit("response.output_item.added", { output_index: i, item });
-		if (item.type === "message") {
-			for (let j = 0; j < (item.content ?? []).length; j++) {
-				const part = item.content[j];
-				emit("response.content_part.added", { output_index: i, content_index: j, part });
-				if (part.type === "output_text") {
-					emit("response.output_text.done", { output_index: i, content_index: j, text: part.text });
+async function streamResponses(body, client, res, requestContext = {}) {
+	const model = requestContext.model || body.model || "gpt-5.4";
+	const requestId = requestContext.requestId || `req-${randomUUID()}`;
+	const upstreamBody = buildResponsesUpstreamBody({ ...body, __requestId: requestId }, model);
+	log("info", "upstream_stream_relay_start", {
+		requestId,
+		model,
+		inputCount: Array.isArray(upstreamBody.input) ? upstreamBody.input.length : 0,
+		toolCount: Array.isArray(upstreamBody.tools) ? upstreamBody.tools.length : 0,
+	});
+	const upstream = await client.request("/responses", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ ...upstreamBody, stream: true }),
+	});
+	if (!upstream.ok) {
+		const text = await upstream.text();
+		const upstreamError = buildUpstreamErrorResponse(
+			(() => {
+				try {
+					return JSON.parse(text);
+				} catch {
+					return text;
 				}
-			}
-		}
-		emit("response.output_item.done", { output_index: i, item });
+			})(),
+			`upstream ${upstream.status}: ${text.slice(0, 500)}`,
+		);
+		res.writeHead(upstreamError.status, { "Content-Type": "application/json" });
+		res.end(JSON.stringify({ error: upstreamError.error }));
+		return;
 	}
-	emit("response.completed", { response: responsesResult });
+	res.writeHead(200, {
+		"Content-Type": upstream.headers?.get?.("content-type") || "text/event-stream",
+		"Cache-Control": "no-cache",
+		Connection: "keep-alive",
+	});
+	const reader = upstream.body.getReader();
+	let totalBytes = 0;
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		totalBytes += value?.byteLength || 0;
+		res.write(Buffer.from(value));
+	}
 	res.end();
+	log("info", "upstream_stream_relay_end", { requestId, model, totalBytes });
 }
 
 /** Bifrost/openclaw request stream:true on the Chat Completions side even though we
@@ -595,7 +648,15 @@ async function readJsonBody(req) {
 }
 
 async function main() {
-	const client = createCodexOAuthClient({ authFilePath: OAUTH_FILE, responsesState: false });
+	const client = createCodexOAuthClient({
+		authFilePath: OAUTH_FILE,
+		responsesState: false,
+		codexVersion: CODEX_VERSION,
+		headers: {
+			originator: "codex_cli_rs",
+			"User-Agent": CODEX_USER_AGENT,
+		},
+	});
 
 	const server = createServer(async (req, res) => {
 		try {
@@ -609,6 +670,16 @@ async function main() {
 			});
 			if (req.method === "POST" && req.url === "/v1/responses") {
 				const body = await readJsonBody(req);
+				if (body.stream === true) {
+					await streamResponses(body, client, res, {
+						requestId,
+						startedAt: Date.now(),
+						remoteAddress: req.socket.remoteAddress,
+						stream: true,
+						model: body.model,
+					});
+					return;
+				}
 				const result = await handleResponses(body, client, {
 					requestId,
 					startedAt: Date.now(),
@@ -616,12 +687,8 @@ async function main() {
 					stream: body.stream,
 					model: body.model,
 				});
-				if (body.stream === true) {
-					writeResponsesChunkStream(res, result);
-				} else {
-					res.writeHead(200, { "Content-Type": "application/json" });
-					res.end(JSON.stringify(result));
-				}
+				res.writeHead(200, { "Content-Type": "application/json" });
+				res.end(JSON.stringify(result));
 				return;
 			}
 			if (req.method === "POST" && req.url === "/v1/chat/completions") {
@@ -644,7 +711,7 @@ async function main() {
 			if (req.method === "GET" && req.url?.startsWith("/v1/models")) {
 				const configuredModels = process.env.MODELS ? process.env.MODELS.split(",").map((m) => m.trim()) : undefined;
 				const models = await resolveOpenAIOAuthModels(client, configuredModels, {
-					codexVersion: process.env.CODEX_VERSION,
+					codexVersion: CODEX_VERSION,
 				});
 				res.writeHead(200, { "Content-Type": "application/json" });
 				res.end(JSON.stringify({ object: "list", data: models.map((id) => ({ id, object: "model", created: 0, owned_by: "codex-oauth" })) }));
@@ -672,7 +739,16 @@ async function main() {
 	});
 }
 
-main().catch((error) => {
-	console.error(error);
-	process.exit(1);
-});
+export {
+	buildResponsesUpstreamBody,
+	handleChatCompletions,
+	reasoningEffortFromBody,
+	resolveReasoningEffort,
+};
+
+if (!TEST_MODE && import.meta.url === pathToFileURL(process.argv[1]).href) {
+	main().catch((error) => {
+		console.error(error);
+		process.exit(1);
+	});
+}
