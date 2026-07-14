@@ -1,5 +1,42 @@
 # Dockers Notes
 
+## 2026-07-14
+
+### Bifrost compat parameter passthrough
+
+#### Goal
+- Stop Bifrost from silently deleting request parameters that are absent from a
+  public model-catalog `supported_parameters` allowlist.
+
+#### Discovery
+- Upstream Bifrost exposes `PUT /api/config` for runtime client-config updates;
+  that handler persists `client_config` to `config_client`, reloads the in-memory
+  client config, and reloads the built-in compat plugin when compat flags change.
+- For this deployment, the mounted `config/bifrost.config.json.tmpl` renders to
+  `/app/data/config.json`. On container startup, Bifrost's `LoadConfig` loads the
+  `client` section and calls `UpdateClientConfig` when the client-config hash
+  differs from the row in `config_client`, so changing the template is enough for
+  a recreated container to update the persisted `compat_should_drop_params` DB
+  column.
+- A template-only edit does not affect an already-running process until the
+  service is recreated or `/api/config` is called.
+
+#### Decision
+- Set `client.compat.should_drop_params` to `false` in the devserver Bifrost
+  config template and rendered live config.
+- Leave the other compat features enabled: text-to-chat conversion,
+  chat-to-Responses conversion, and parameter conversion.
+- Treat this as a global Bifrost behavior change, not a codex-specific fix. The
+  configured providers currently include `openrouter`, `anthropic`,
+  `opencode-zen`, `openai`, `codex`, `nvidia`, `deepseek`, `nanogpt`,
+  `unsloth`, `lmstudio`, `ollama`, `local-tts`, `speaches`, `audiocpp`,
+  `nemotron-asr`, and `parakeet-asr`; any of them may now receive request fields
+  Bifrost previously dropped.
+
+#### Verification
+- After rendering and recreating the service, verify with:
+  `sqlite3 volumes/bifrost/config.db 'select compat_should_drop_params from config_client;'`.
+
 ## 2026-07-06
 
 ### Bifrost dynamic partial model-list patch

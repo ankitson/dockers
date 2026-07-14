@@ -1,5 +1,17 @@
 # Dockers Changelog
 
+## 2026-07-14
+
+### Bifrost dynamic deployment: disable compat parameter dropping
+
+- Disabled Bifrost's global compatibility-plugin parameter dropping in the
+  devserver Bifrost client config by setting
+  `client.compat.should_drop_params: false`.
+- This is a global behavior change for the deployed Bifrost instance: all
+  providers can now receive unsupported or previously catalog-filtered request
+  parameters instead of having Bifrost silently delete them before provider
+  dispatch.
+
 ## 2026-07-06
 
 ### Bifrost dynamic: partial model-list fanout
