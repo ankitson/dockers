@@ -1,5 +1,5 @@
-ARG BIFROST_REF=transports/v1.6.3
-ARG VERSION=1.6.3
+ARG BIFROST_REF=transports/v1.6.4
+ARG VERSION=1.6.4
 
 FROM node:25-alpine3.23 AS ui-builder
 ARG BIFROST_REF
@@ -17,12 +17,21 @@ WORKDIR /src
 RUN apk add --no-cache git ca-certificates gcc musl-dev sqlite-dev binutils binutils-gold
 RUN git clone https://github.com/maximhq/bifrost.git . && git checkout "$BIFROST_REF"
 COPY patches/ /patches/
-RUN git apply /patches/list-models-partial-timeout.patch /patches/pass-chat-template-kwargs.patch /patches/add-reasoning-content-field.patch
+RUN git apply \
+  /patches/list-models-partial-timeout.patch \
+  /patches/pass-chat-template-kwargs.patch \
+  /patches/add-reasoning-content-field.patch \
+  /patches/preserve-custom-provider-hosted-tools.patch \
+  /patches/allow-custom-provider-vk-wildcard.patch
 COPY --from=ui-builder /src/ui/out ./transports/bifrost-http/ui
 
 ENV CGO_ENABLED=1 GOOS=linux GOWORK=off
 WORKDIR /src/transports
-RUN go mod edit -replace github.com/maximhq/bifrost/core=/src/core && \
+RUN go mod edit \
+  -replace github.com/maximhq/bifrost/core=/src/core \
+  -replace github.com/maximhq/bifrost/framework=/src/framework \
+  -replace github.com/maximhq/bifrost/plugins/compat=/src/plugins/compat \
+  -replace github.com/maximhq/bifrost/plugins/governance=/src/plugins/governance && \
   go mod tidy && \
   go mod download
 RUN go build \

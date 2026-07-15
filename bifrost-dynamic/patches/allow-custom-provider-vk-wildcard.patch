@@ -1,0 +1,64 @@
+diff --git a/framework/modelcatalog/customproviderwildcard_test.go b/framework/modelcatalog/customproviderwildcard_test.go
+new file mode 100644
+index 0000000..34403ba
+--- /dev/null
++++ b/framework/modelcatalog/customproviderwildcard_test.go
+@@ -0,0 +1,24 @@
++package modelcatalog
++
++import (
++	"testing"
++
++	"github.com/maximhq/bifrost/core/schemas"
++	"github.com/maximhq/bifrost/framework/configstore"
++)
++
++func TestCustomProviderWildcardAllowsUnlistedAlias(t *testing.T) {
++	catalog := NewTestCatalog(nil)
++	provider := schemas.ModelProvider("lmstudio")
++	catalog.UpsertLive(provider, "lmstudio-key", false, []string{"lmstudio/gemma-listed"})
++	providerConfig := &configstore.ProviderConfig{
++		CustomProviderConfig: &schemas.CustomProviderConfig{},
++	}
++
++	if !providerConfig.CustomProviderConfig.IsOperationAllowed(schemas.ListModelsRequest) {
++		t.Fatal("test requires list-models to be enabled")
++	}
++	if !catalog.IsModelAllowedForProvider(provider, "current", providerConfig, schemas.WhiteList{"*"}) {
++		t.Fatal("wildcard VK policy blocked a callable custom-provider alias absent from /v1/models")
++	}
++}
+diff --git a/framework/modelcatalog/models.go b/framework/modelcatalog/models.go
+index f36c31a..73113d3 100644
+--- a/framework/modelcatalog/models.go
++++ b/framework/modelcatalog/models.go
+@@ -242,21 +242,20 @@ func (mc *ModelCatalog) GetProvidersForModel(model string) []schemas.ModelProvid
+ // provider given an explicit allowedModels list (used by VK governance
+ // checks, not by the static keyconfig allow set).
+ //
+-//   - allowedModels=["*"]: defer to GetProvidersForModel (with custom-provider
+-//     fast path when list-models is disabled).
++//   - allowedModels=["*"]: allow every model for custom providers; standard
++//     providers still defer to GetProvidersForModel.
+ //   - allowedModels=[]: deny-by-default.
+ //   - explicit allowedModels: direct or provider-prefixed match against the
+ //     provider's catalog.
+ func (mc *ModelCatalog) IsModelAllowedForProvider(provider schemas.ModelProvider, model string, providerConfig *configstore.ProviderConfig, allowedModels schemas.WhiteList) bool {
+-	isCustomProvider := false
+-	hasListModelsEndpointDisabled := false
+-	if providerConfig != nil && providerConfig.CustomProviderConfig != nil {
+-		isCustomProvider = true
+-		hasListModelsEndpointDisabled = !providerConfig.CustomProviderConfig.IsOperationAllowed(schemas.ListModelsRequest)
+-	}
++	isCustomProvider := providerConfig != nil && providerConfig.CustomProviderConfig != nil
+ 
+ 	if allowedModels.IsUnrestricted() {
+-		if isCustomProvider && hasListModelsEndpointDisabled {
++		// Custom OpenAI-compatible providers can expose callable aliases such as
++		// LM Studio's "current" that are intentionally absent from /v1/models.
++		// The VK has already granted this provider explicitly, so its wildcard
++		// must retain WhiteList's documented allow-all semantics.
++		if isCustomProvider {
+ 			return true
+ 		}
+ 		return slices.Contains(mc.GetProvidersForModel(model), provider)

@@ -1,5 +1,57 @@
 # Dockers Changelog
 
+## 2026-07-14
+
+### Bifrost 1.6.4 and custom-provider VK wildcard correctness
+
+- Upgraded the dynamic image from `transports/v1.6.3` to `v1.6.4`, including
+  upstream's repair migration for bare wildcard model-list rows from issue
+  #4318.
+- Added a focused source patch so `allowed_models: ["*"]` remains genuinely
+  unrestricted for explicitly granted custom providers, including callable
+  aliases such as LM Studio's `current` that are absent from `/v1/models`.
+- Rebased the `reasoning_content` patch over 1.6.4's custom unmarshalling and
+  citation fields, preserving the compatibility field during unmarshal and
+  stream deep-copy operations with regression tests.
+- Made the transport build replace patched local `core`, `framework`,
+  `plugins/compat`, and `plugins/governance` modules so every source patch is
+  present in the final binary.
+
+### Bifrost dynamic deployment: disable compat parameter dropping
+
+- Disabled Bifrost's global compatibility-plugin parameter dropping in the
+  devserver Bifrost client config by setting
+  `client.compat.should_drop_params: false`.
+- This is a global behavior change for the deployed Bifrost instance: all
+  providers can now receive unsupported or previously catalog-filtered request
+  parameters instead of having Bifrost silently delete them before provider
+  dispatch.
+
+## 2026-07-10
+
+### Bifrost dynamic: preserve hosted Responses tools for custom providers
+
+- Added an upstream source patch that correctly marks protocol-based custom
+  providers as custom, then prevents public-model compatibility metadata from
+  deleting `web_search` and `web_search_preview` before they receive a request.
+- Kept the existing fail-closed hosted-tool filtering for standard providers
+  and added a focused upstream regression test for both branches.
+- Registered the patch in the local patch-stack manifest and made the transport
+  build replace both patched local `core` and `plugins/compat` modules.
+
+### Codex OAuth proxy: Responses correctness
+
+- Preserved `reasoning.effort` independently of whether encrypted reasoning was
+  requested, while forwarding `reasoning.encrypted_content` only when included
+  by the client.
+- Mapped upstream subscription usage-limit failures to HTTP 429.
+- Replaced buffered synthetic Responses streaming with direct upstream SSE relay,
+  preserving real output-text deltas through Bifrost.
+- Kept `openai-oauth` and Codex on `@latest`, derived the client version from the
+  installed binary at runtime, and forwarded the first-party Codex client
+  identity required for 5.6 rollout discovery/execution.
+- Added a Just recipe for a repeatable proxy syntax check.
+
 ## 2026-07-06
 
 ### Bifrost dynamic: partial model-list fanout

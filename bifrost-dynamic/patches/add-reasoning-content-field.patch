@@ -1,8 +1,8 @@
 diff --git a/core/schemas/chatcompletions.go b/core/schemas/chatcompletions.go
-index 96f3fd102..a579ccec9 100644
+index aa748e9..c44a182 100644
 --- a/core/schemas/chatcompletions.go
 +++ b/core/schemas/chatcompletions.go
-@@ -1372,6 +1372,7 @@ type ChatAssistantMessage struct {
+@@ -1389,6 +1389,7 @@ type ChatAssistantMessage struct {
  	Refusal          *string                          `json:"refusal,omitempty"`
  	Audio            *ChatAudioMessageAudio           `json:"audio,omitempty"`
  	Reasoning        *string                          `json:"reasoning,omitempty"`
@@ -10,16 +10,96 @@ index 96f3fd102..a579ccec9 100644
  	ReasoningDetails []ChatReasoningDetails           `json:"reasoning_details,omitempty"`
  	Annotations      []ChatAssistantMessageAnnotation `json:"annotations,omitempty"`
  	ToolCalls        []ChatAssistantMessageToolCall   `json:"tool_calls,omitempty"`
-@@ -1552,6 +1553,7 @@ type ChatStreamResponseChoiceDelta struct {
- 	Refusal          *string                        `json:"refusal,omitempty"`   // Refusal content if any
- 	Audio            *ChatAudioMessageAudio         `json:"audio,omitempty"`     // Audio data if any
- 	Reasoning        *string                        `json:"reasoning,omitempty"` // May be empty string or null
-+	ReasoningContent *string                        `json:"reasoning_content,omitempty"`
- 	ReasoningDetails []ChatReasoningDetails         `json:"reasoning_details,omitempty"`
- 	ToolCalls        []ChatAssistantMessageToolCall `json:"tool_calls,omitempty"` // If tool calls used (supports incremental updates)
- }
+@@ -1417,6 +1418,7 @@ func (cm *ChatAssistantMessage) UnmarshalJSON(data []byte) error {
+ 
+ 	// Copy decoded data back into the original type
+ 	*cm = ChatAssistantMessage(aux.Alias)
++	cm.ReasoningContent = aux.ReasoningContent
+ 
+ 	// Map xAI's reasoning_content to Bifrost's Reasoning field
+ 	// This allows both OpenAI's "reasoning" and xAI's "reasoning_content" to work
+@@ -1570,6 +1572,7 @@ type ChatStreamResponseChoiceDelta struct {
+ 	Refusal          *string                          `json:"refusal,omitempty"`   // Refusal content if any
+ 	Audio            *ChatAudioMessageAudio           `json:"audio,omitempty"`     // Audio data if any
+ 	Reasoning        *string                          `json:"reasoning,omitempty"` // May be empty string or null
++	ReasoningContent *string                          `json:"reasoning_content,omitempty"`
+ 	ReasoningDetails []ChatReasoningDetails           `json:"reasoning_details,omitempty"`
+ 	Annotations      []ChatAssistantMessageAnnotation `json:"annotations,omitempty"`   // URL citations from web search
+ 	ToolCalls        []ChatAssistantMessageToolCall   `json:"tool_calls,omitempty"`    // If tool calls used (supports incremental updates)
+@@ -1595,6 +1598,7 @@ func (d *ChatStreamResponseChoiceDelta) UnmarshalJSON(data []byte) error {
+ 
+ 	// Copy decoded data back into the original type
+ 	*d = ChatStreamResponseChoiceDelta(aux.Alias)
++	d.ReasoningContent = aux.ReasoningContent
+ 
+ 	// Map xAI's reasoning_content to Bifrost's Reasoning field
+ 	// This allows both OpenAI's "reasoning" and xAI's "reasoning_content" to work
+diff --git a/core/schemas/reasoningcontent_test.go b/core/schemas/reasoningcontent_test.go
+new file mode 100644
+index 0000000..a9cdc4a
+--- /dev/null
++++ b/core/schemas/reasoningcontent_test.go
+@@ -0,0 +1,58 @@
++package schemas
++
++import (
++	"encoding/json"
++	"testing"
++)
++
++func TestReasoningContentRoundTrip(t *testing.T) {
++	tests := []struct {
++		name      string
++		unmarshal func([]byte) (reasoning, reasoningContent *string, encoded []byte, err error)
++	}{
++		{
++			name: "assistant message",
++			unmarshal: func(data []byte) (*string, *string, []byte, error) {
++				var value ChatAssistantMessage
++				if err := json.Unmarshal(data, &value); err != nil {
++					return nil, nil, nil, err
++				}
++				encoded, err := json.Marshal(value)
++				return value.Reasoning, value.ReasoningContent, encoded, err
++			},
++		},
++		{
++			name: "stream delta",
++			unmarshal: func(data []byte) (*string, *string, []byte, error) {
++				var value ChatStreamResponseChoiceDelta
++				if err := json.Unmarshal(data, &value); err != nil {
++					return nil, nil, nil, err
++				}
++				encoded, err := json.Marshal(value)
++				return value.Reasoning, value.ReasoningContent, encoded, err
++			},
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			reasoning, reasoningContent, encoded, err := tt.unmarshal([]byte(`{"reasoning_content":"thinking"}`))
++			if err != nil {
++				t.Fatal(err)
++			}
++			if reasoning == nil || *reasoning != "thinking" {
++				t.Fatalf("reasoning = %v, want thinking", reasoning)
++			}
++			if reasoningContent == nil || *reasoningContent != "thinking" {
++				t.Fatalf("reasoning_content = %v, want thinking", reasoningContent)
++			}
++			var payload map[string]any
++			if err := json.Unmarshal(encoded, &payload); err != nil {
++				t.Fatal(err)
++			}
++			if payload["reasoning_content"] != "thinking" {
++				t.Fatalf("encoded reasoning_content = %v, want thinking", payload["reasoning_content"])
++			}
++		})
++	}
++}
 diff --git a/framework/streaming/chat.go b/framework/streaming/chat.go
-index d0901cdf8..8db8f495f 100644
+index b087507..f229f8e 100644
 --- a/framework/streaming/chat.go
 +++ b/framework/streaming/chat.go
 @@ -41,6 +41,11 @@ func deepCopyChatStreamDelta(original *schemas.ChatStreamResponseChoiceDelta) *s
@@ -34,3 +114,29 @@ index d0901cdf8..8db8f495f 100644
  	// Deep copy ReasoningDetails slice
  	if original.ReasoningDetails != nil {
  		copy.ReasoningDetails = make([]schemas.ChatReasoningDetails, len(original.ReasoningDetails))
+diff --git a/framework/streaming/reasoningcontent_test.go b/framework/streaming/reasoningcontent_test.go
+new file mode 100644
+index 0000000..861b9d9
+--- /dev/null
++++ b/framework/streaming/reasoningcontent_test.go
+@@ -0,0 +1,20 @@
++package streaming
++
++import (
++	"testing"
++
++	"github.com/maximhq/bifrost/core/schemas"
++)
++
++func TestDeepCopyChatStreamDeltaCopiesReasoningContent(t *testing.T) {
++	value := "thinking"
++	original := &schemas.ChatStreamResponseChoiceDelta{ReasoningContent: &value}
++	copied := deepCopyChatStreamDelta(original)
++
++	if copied.ReasoningContent == nil || *copied.ReasoningContent != value {
++		t.Fatalf("copied reasoning_content = %v, want %q", copied.ReasoningContent, value)
++	}
++	if copied.ReasoningContent == original.ReasoningContent {
++		t.Fatal("reasoning_content pointer was not deep-copied")
++	}
++}

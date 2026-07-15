@@ -1,5 +1,153 @@
 # Dockers Notes
 
+## 2026-07-14
+
+### Bifrost VK wildcard semantics and 1.6.4 upgrade
+
+#### Goal
+- Make wildcard virtual-key grants reliable for LM Studio's dynamic `current`
+  alias and eliminate manual SQLite policy edits.
+
+#### Discovery
+- Request `5cc21dc6-47c8-4a2f-b258-798938f9df90` was denied before provider
+  dispatch because the dev VK's LM Studio policy contained
+  `allowed_models=["*","current"]`.
+- Bifrost's `WhiteList` contract requires `"*"` to be the only entry. The prior
+  direct SQLite update bypassed `BeforeSave` validation, turning the list into a
+  restricted list that matched neither the resolved model nor wildcard mode.
+- Upstream issue #4318 is adjacent but not the direct cause: it repairs legacy
+  rows stored as bare `*` instead of JSON. This row was valid JSON with invalid
+  wildcard composition. The #4318 migration shipped in `transports/v1.6.4`.
+- Even canonical `["*"]` was insufficient for callable custom-provider aliases
+  absent from model discovery. The released model-catalog path only honored a
+  custom-provider wildcard without catalog membership when `list_models` was
+  disabled.
+- Patching `/src/framework` had no runtime effect until the transport module
+  replaced its released `framework` and `governance` dependencies with the
+  patched checkout.
+
+#### Decision
+- Upgrade the image to `transports/v1.6.4` and retain model discovery.
+- Treat a wildcard grant on an explicitly selected custom provider as true
+  allow-all, matching `WhiteList`'s documented semantics. Standard providers
+  keep catalog cross-checking.
+- Rebase the existing `reasoning_content` patch over 1.6.4 and compile all
+  patched local modules into the transport. This is a source build patch, not a
+  new Bifrost plugin.
+
+#### Verification
+- All five source patches apply cleanly to `transports/v1.6.4`.
+- Focused schema, stream-copy, model-catalog wildcard, and compatibility-plugin
+  tests passed against the patched checkout.
+- The image built successfully and the recreated Bifrost container is healthy.
+- Both `lmstudio/current` and the provider-qualified loaded model completed
+  through the dev VK while its persisted policy remained canonical `["*"]`.
+
+### Bifrost compat parameter passthrough
+
+#### Goal
+- Stop Bifrost from silently deleting request parameters that are absent from a
+  public model-catalog `supported_parameters` allowlist.
+
+#### Discovery
+- Upstream Bifrost exposes `PUT /api/config` for runtime client-config updates;
+  that handler persists `client_config` to `config_client`, reloads the in-memory
+  client config, and reloads the built-in compat plugin when compat flags change.
+- For this deployment, the mounted `config/bifrost.config.json.tmpl` renders to
+  `/app/data/config.json`. On container startup, Bifrost's `LoadConfig` loads the
+  `client` section and calls `UpdateClientConfig` when the client-config hash
+  differs from the row in `config_client`, so changing the template is enough for
+  a recreated container to update the persisted `compat_should_drop_params` DB
+  column.
+- A template-only edit does not affect an already-running process until the
+  service is recreated or `/api/config` is called.
+
+#### Decision
+- Set `client.compat.should_drop_params` to `false` in the devserver Bifrost
+  config template and rendered live config.
+- Leave the other compat features enabled: text-to-chat conversion,
+  chat-to-Responses conversion, and parameter conversion.
+- Treat this as a global Bifrost behavior change, not a codex-specific fix. The
+  configured providers currently include `openrouter`, `anthropic`,
+  `opencode-zen`, `openai`, `codex`, `nvidia`, `deepseek`, `nanogpt`,
+  `unsloth`, `lmstudio`, `ollama`, `local-tts`, `speaches`, `audiocpp`,
+  `nemotron-asr`, and `parakeet-asr`; any of them may now receive request fields
+  Bifrost previously dropped.
+
+#### Verification
+- After rendering and recreating the service, verify with:
+  `sqlite3 volumes/bifrost/config.db 'select compat_should_drop_params from config_client;'`.
+
+## 2026-07-10
+
+### Bifrost custom-provider hosted tools
+
+#### Goal
+- Preserve native Responses hosted tools when a custom OpenAI-compatible
+  provider supports more than Bifrost's public model metadata declares.
+
+#### Discovery
+- Bifrost parsed `web_search` correctly and logged it on the incoming request,
+  but the Codex OAuth proxy received zero tools.
+- With `compat_should_drop_params` enabled, the compatibility plugin used the
+  public `gpt-5.4-mini` catalog row. That row declares function tools but not
+  hosted web search, so functions survived while `web_search` was silently
+  deleted.
+- Bifrost's `is-custom-provider` context flag was derived from the provider's
+  base wire protocol. A custom provider based on OpenAI was therefore marked as
+  non-custom, defeating the intended custom-provider compatibility branch.
+- The transport module separately pins a released `plugins/compat` Go module.
+  Patching the checkout alone had no runtime effect until the image build also
+  replaced that module with `/src/plugins/compat`.
+- A separate lossy path exists when a custom provider allows chat completions
+  but disables Responses: Bifrost converts Responses to Chat and intentionally
+  retains only function tools. Native Responses support must remain enabled for
+  any provider expected to handle hosted tools.
+
+#### Decision
+- Derive the custom-provider flag by comparing the selected provider key with
+  its resolved base wire provider, not by testing whether that base is standard.
+  Skip catalog-based hosted-tool deletion only after Bifrost has selected that
+  custom provider. Standard providers retain the existing filtering.
+- Populate that flag before both non-streaming and streaming pre-LLM plugin
+  pipelines; the provider worker runs too late to protect request parameters.
+- Compile both the patched local `core` and `plugins/compat` modules into the
+  transport binary.
+- Keep both `responses` and `responses_stream` enabled on the Codex provider.
+
+#### Verification
+- The focused upstream test preserves function, `web_search`, and
+  `web_search_preview` for custom providers and verifies that standard providers
+  still remove the hosted tools.
+- The patch applies cleanly to `transports/v1.6.3` and is built into the local
+  dynamic image.
+
+### Codex OAuth Responses behavior
+
+#### Decision
+- Keep the subscription backend explicitly stateless by forcing `store:false`.
+- Forward reasoning effort even when encrypted reasoning continuity was not
+  requested; treat encrypted content as a separate include capability.
+- Preserve upstream usage-limit semantics as HTTP 429 so conformance clients can
+  distinguish an account window from routing or provider failures.
+- Relay streaming Responses directly from the upstream Codex SSE body. The
+  non-stream path still aggregates output-item events because the final
+  `response.completed` snapshot can omit output when `store:false`.
+- Install `openai-oauth@latest` and `@openai/codex@latest`. At runtime, derive
+  the Codex version from `codex --version` and send the matching first-party
+  `User-Agent` and `originator`. The backend gates rollout discovery and Luna
+  execution on that client identity even for an entitled OAuth account.
+- Use `just codex-oauth-build-latest` (a no-cache build) when refreshing the
+  image; Docker otherwise treats an old cached `@latest` install layer as valid.
+
+#### Verification
+- Hosted `web_search` arrives at the Codex adapter with one tool and produces
+  native `web_search_call` events.
+- Dynamic discovery returns `gpt-5.6-luna`, `gpt-5.6-terra`, and
+  `gpt-5.6-sol`; all three completed low-effort smoke requests through Bifrost.
+- The final gateway conformance run passes both qualified and bare progressive
+  SSE checks as well as hosted search and MCP server-side execution.
+
 ## 2026-07-06
 
 ### Bifrost dynamic partial model-list patch

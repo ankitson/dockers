@@ -32,6 +32,24 @@ reason = "Add ReasoningContent output field so the normalizer plugin can serve c
 applied_by = ["bifrost-dynamic/Dockerfile"]
 remove_when = "Upstream adds ReasoningContent to ChatStreamResponseChoiceDelta (or renames Reasoning's JSON tag to reasoning_content)."
 
+[[stacks.patches]]
+id = "bifrost-allow-custom-provider-vk-wildcard"
+type = "git-apply"
+path = "bifrost-dynamic/patches/allow-custom-provider-vk-wildcard.patch"
+status = "active"
+reason = "Honor allowed_models wildcard semantics for explicitly granted custom-provider aliases that are callable but absent from model discovery."
+applied_by = ["bifrost-dynamic/Dockerfile"]
+remove_when = "Upstream allows custom-provider VK wildcards without requiring every callable alias to appear in /v1/models."
+
+[[stacks.patches]]
+id = "bifrost-preserve-custom-provider-hosted-tools"
+type = "git-apply"
+path = "bifrost-dynamic/patches/preserve-custom-provider-hosted-tools.patch"
+status = "active"
+reason = "Do not let public model-catalog compatibility metadata silently strip hosted Responses tools from custom OpenAI-compatible providers."
+applied_by = ["bifrost-dynamic/Dockerfile"]
+remove_when = "Upstream scopes hosted-tool filtering to standard providers or makes custom-provider capabilities authoritative."
+
 [[stacks]]
 id = "openclaw"
 owner_path = "openclaw"
