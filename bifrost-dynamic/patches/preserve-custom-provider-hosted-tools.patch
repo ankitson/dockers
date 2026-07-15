@@ -1,0 +1,107 @@
+diff --git a/core/bifrost.go b/core/bifrost.go
+index 73ab191..f0b48ae 100644
+--- a/core/bifrost.go
++++ b/core/bifrost.go
+@@ -5178,6 +5178,12 @@ func (bifrost *Bifrost) handleStreamRequestWithFallbacks(ctx *schemas.BifrostCon
+ 	return nil, primaryErr
+ }
+ 
++func (bifrost *Bifrost) setCustomProviderContext(ctx *schemas.BifrostContext, provider schemas.ModelProvider) {
++	config, err := bifrost.account.GetConfigForProvider(provider)
++	isCustomProvider := err == nil && config != nil && config.CustomProviderConfig != nil
++	ctx.SetValue(schemas.BifrostContextKeyIsCustomProvider, isCustomProvider)
++}
++
+ // tryRequest is a generic function that handles common request processing logic
+ // It consolidates queue setup, plugin pipeline execution, enqueue logic, and response handling
+ func (bifrost *Bifrost) tryRequest(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*schemas.BifrostResponse, *schemas.BifrostError) {
+@@ -5188,6 +5194,8 @@ func (bifrost *Bifrost) tryRequest(ctx *schemas.BifrostContext, req *schemas.Bif
+ 		return nil, bifrostErr
+ 	}
+ 
++	bifrost.setCustomProviderContext(ctx, provider)
++
+ 	// Add MCP tools to request if MCP is configured and requested
+ 	if bifrost.MCPManager != nil {
+ 		req = bifrost.MCPManager.AddToolsToRequest(ctx, req)
+@@ -5418,6 +5426,8 @@ func (bifrost *Bifrost) tryStreamRequest(ctx *schemas.BifrostContext, req *schema
+ 		return nil, bifrostErr
+ 	}
+ 
++	bifrost.setCustomProviderContext(ctx, provider)
++
+ 	// Add MCP tools to request if MCP is configured and requested
+ 	if req.RequestType != schemas.SpeechStreamRequest && req.RequestType != schemas.TranscriptionStreamRequest && bifrost.MCPManager != nil {
+ 		req = bifrost.MCPManager.AddToolsToRequest(ctx, req)
+@@ -6346,7 +6356,7 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
+ 		if cfg := config.CustomProviderConfig; cfg != nil && cfg.BaseProviderType != "" {
+ 			baseProvider = cfg.BaseProviderType
+ 		}
+-		req.Context.SetValue(schemas.BifrostContextKeyIsCustomProvider, !IsStandardProvider(baseProvider))
++		req.Context.SetValue(schemas.BifrostContextKeyIsCustomProvider, provider.GetProviderKey() != baseProvider)
+ 
+ 		// Disable Anthropic raw-body passthrough when this attempt's provider isn't Anthropic-native (e.g. Bedrock).
+ 		clearAnthropicPassthroughForNonNativeProvider(req.Context, baseProvider)
+diff --git a/plugins/compat/dropparams.go b/plugins/compat/dropparams.go
+index 9cc2853..ceae31d 100644
+--- a/plugins/compat/dropparams.go
++++ b/plugins/compat/dropparams.go
+@@ -190,7 +190,12 @@ func dropUnsupportedParams(ctx *schemas.BifrostContext, req *schemas.BifrostRequ
+ 			params.Tools = nil
+ 			dropped = append(dropped, "tools")
+ 		}
+-		if !isSupported["web_search"] {
++		// A custom OpenAI-compatible provider can support hosted tools that are
++		// absent from the public model catalog. The catalog is authoritative for
++		// standard providers, but must not strip those provider-native tools from
++		// a custom endpoint before it has a chance to handle them.
++		isCustomProvider, _ := ctx.Value(schemas.BifrostContextKeyIsCustomProvider).(bool)
++		if !isSupported["web_search"] && !isCustomProvider {
+ 			droppedKeys := dropWebsearchToolCalls(req)
+ 			dropped = append(dropped, droppedKeys...)
+ 		}
+diff --git a/plugins/compat/dropparams_test.go b/plugins/compat/dropparams_test.go
+index de69bb6..a9ec41b 100644
+--- a/plugins/compat/dropparams_test.go
++++ b/plugins/compat/dropparams_test.go
+@@ -219,3 +219,40 @@ func TestDropUnsupportedParams_ChatReasoningWithUnsupportedTools(t *testing.T) {
+ 		t.Errorf("reasoning not reported in dropped=%v, want present", dropped)
+ 	}
+ }
++
++func TestDropUnsupportedParams_CustomProviderPreservesResponsesHostedTools(t *testing.T) {
++	newRequest := func() *schemas.BifrostRequest {
++		return newResponsesRequest(schemas.OpenAI, "gpt-5.4-mini", &schemas.ResponsesParameters{
++			Tools: []schemas.ResponsesTool{
++				{Type: schemas.ResponsesToolTypeFunction},
++				{Type: schemas.ResponsesToolTypeWebSearch},
++				{Type: schemas.ResponsesToolTypeWebSearchPreview},
++			},
++		})
++	}
++
++	customReq := newRequest()
++	customCtx := newTestContext()
++	customCtx.SetValue(schemas.BifrostContextKeyIsCustomProvider, true)
++	customDropped := dropUnsupportedParams(customCtx, customReq, []string{"tools"})
++	if got := len(customReq.ResponsesRequest.Params.Tools); got != 3 {
++		t.Fatalf("custom provider tools = %d, want all 3 preserved", got)
++	}
++	for _, unexpected := range []string{"tools[1].web_search", "tools[2].web_search_preview"} {
++		if slices.Contains(customDropped, unexpected) {
++			t.Errorf("custom provider reported %q in dropped=%v", unexpected, customDropped)
++		}
++	}
++
++	standardReq := newRequest()
++	standardDropped := dropUnsupportedParams(newTestContext(), standardReq, []string{"tools"})
++	tools := standardReq.ResponsesRequest.Params.Tools
++	if got := len(tools); got != 1 || tools[0].Type != schemas.ResponsesToolTypeFunction {
++		t.Fatalf("standard provider tools = %+v, want only function tool", tools)
++	}
++	for _, expected := range []string{"tools[1].web_search", "tools[2].web_search_preview"} {
++		if !slices.Contains(standardDropped, expected) {
++			t.Errorf("standard provider missing %q in dropped=%v", expected, standardDropped)
++		}
++	}
++}
